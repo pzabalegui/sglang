@@ -191,9 +191,63 @@ def orthogonalize_matrix(matrix, vec):
 
 ---
 
+---
+
+## Experiment 2: GLM-4.7-Flash (Pending)
+
+**Date:** TBD
+**Server:** TBD
+**Model:** zai-org/GLM-4.7-Flash
+**Config:** configs/glm47flash_ablation.yaml
+
+### Model Architecture
+
+| Parameter | Value |
+|-----------|-------|
+| Type | MoE (30B-A3B) |
+| Total Params | 31B |
+| Active Params | ~3B per token |
+| Layers | 47 |
+| Hidden Size | 2048 |
+| Routed Experts | 64 |
+| Shared Experts | 1 |
+| Experts per Token | 4 |
+| Attention | LoRA-based (q_lora=768, kv_lora=512) |
+
+### Planned Configuration
+
+| Parameter | Value |
+|-----------|-------|
+| LAYER | 35 (75% of 47 layers) |
+| N_INST_TRAIN | 128 |
+| USE_4BIT | True (ablation) / False (ortho) |
+| Direction Method | Mean difference |
+
+### Hardware Requirements
+
+| Technique | VRAM Required |
+|-----------|---------------|
+| Ablation (4-bit) | ~24GB (L40S OK) |
+| Orthogonalization | ~64-80GB (A100 80GB) |
+
+### Results
+
+| Technique | Bypass Rate | Status |
+|-----------|-------------|--------|
+| Ablation | TBD | ⏳ Pending |
+| Orthogonalization | TBD | ⏳ Pending |
+
+### Notes
+- Model uses LoRA attention (different from OLMoE)
+- 64 experts per layer makes orthogonalization expensive
+- Consider testing only shared_experts first for ortho
+
+---
+
 ## Next Experiments
 
-- [ ] Test GLM-4.7-Flash (larger MoE model)
+- [x] Test GLM-4.7-Flash (larger MoE model) → Config ready
+- [ ] Run GLM-4.7-Flash ablation experiment
 - [ ] Test different layer depths for orthogonalization
 - [ ] Investigate hybrid approaches (partial ablation + orthogonalization)
 - [ ] Add quantitative metrics (see plan file)

@@ -1,0 +1,46 @@
+# Configuration for GLM-4.7-Flash Orthogonalization Experiments
+# Model: 30B-A3B MoE (31B params, ~3B active per token)
+# WARNING: Requires full precision - needs more VRAM
+
+model:
+  name: "zai-org/GLM-4.7-Flash"
+  type: "moe"
+  architecture: "glm4_moe_lite"
+  num_layers: 47
+  hidden_size: 2048  # d_model
+  intermediate_size: 10240  # dense MLP
+  moe_intermediate_size: 1536  # per-expert MLP
+
+  # MoE configuration
+  moe:
+    n_routed_experts: 64
+    n_shared_experts: 1
+    num_experts_per_tok: 4
+    topk_method: "noaux_tc"
+
+experiment:
+  name: "glm47flash_ortho_v1"
+  technique: "orthogonalization"
+
+parameters:
+  layer: 35  # 75% of 47 layers
+  n_inst_train: 128
+  use_4bit: false  # REQUIRED for weight modification
+  direction_method: "mean"
+
+orthogonalization:
+  targets:
+    - "all_mlp_layers"  # gate_proj, up_proj, down_proj (shared + routed experts)
+    - "lm_head"
+  # Note: With 64 experts, modifying all expert weights is expensive
+  # Consider: orthogonalize only shared_experts first
+
+hardware:
+  min_vram: "80GB"  # A100 80GB or 2x L40S
+  notes: "Full precision required for weight modification"
+
+results:
+  bypass_rate: null  # TBD
+  notes: |
+    Pending - requires high VRAM for full precision.
+    Consider testing ablation first with 4-bit.
