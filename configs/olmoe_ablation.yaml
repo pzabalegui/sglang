@@ -1,0 +1,27 @@
+# Configuration for OLMoE Ablation Experiments
+# Best configuration achieving 100% bypass rate
+
+model:
+  name: "allenai/OLMoE-1B-7B-0924-Instruct"
+  type: "moe"
+  num_layers: 16
+  d_model: 2048
+
+experiment:
+  name: "olmoe_ablation_v1"
+  technique: "ablation"
+
+parameters:
+  layer: 12  # 75% of model depth
+  n_inst_train: 128  # Number of training instructions
+  use_4bit: true  # Enable for faster inference
+  direction_method: "mean"  # Options: mean, pca
+
+generation:
+  max_new_tokens: 256
+  temperature: 0.7
+  do_sample: false
+
+results:
+  bypass_rate: 1.0  # 100%
+  notes: "Full bypass achieved with dynamic hook intervention"

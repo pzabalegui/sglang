@@ -1,0 +1,37 @@
+# Configuration for OLMoE Orthogonalization Experiments
+# Best configuration achieving 76% bypass rate
+
+model:
+  name: "allenai/OLMoE-1B-7B-0924-Instruct"
+  type: "moe"
+  num_layers: 16
+  d_model: 2048
+
+experiment:
+  name: "olmoe_ortho_v1"
+  technique: "orthogonalization"
+
+parameters:
+  layer: 12  # 75% of model depth
+  n_inst_train: 128  # Number of training instructions
+  use_4bit: false  # REQUIRED: false for weight modification
+  direction_method: "mean"  # Options: mean, pca (mean works better)
+
+orthogonalization:
+  targets:
+    - "all_mlp_layers"  # gate_proj, up_proj, down_proj
+    - "lm_head"
+  # Selective layers (optional, not recommended):
+  # selective_layers: [10, 11, 12, 13, 14, 15]
+
+generation:
+  max_new_tokens: 256
+  temperature: 0.7
+  do_sample: false
+
+results:
+  bypass_rate: 0.76  # 76%
+  notes: |
+    - PCA extraction performs worse (72%)
+    - Per-layer directions break the model
+    - Selective layers show no improvement
