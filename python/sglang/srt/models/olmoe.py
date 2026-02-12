@@ -40,7 +40,10 @@ from sglang.srt.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+from sglang.srt.model_executor.forward_batch_info import (
+    ForwardBatch,
+    apply_steering,
+)
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.utils import add_prefix, make_layers, print_warning_once
 
@@ -303,6 +306,10 @@ class OlmoeModel(nn.Module):
             layer = self.layers[i]
             hidden_states, residual = layer(
                 positions, hidden_states, forward_batch, residual
+            )
+            # Apply steering vector after each layer
+            hidden_states = apply_steering(
+                hidden_states, forward_batch.steering_config, i
             )
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states

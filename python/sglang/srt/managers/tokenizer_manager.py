@@ -940,6 +940,8 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                 custom_logit_processor=obj.custom_logit_processor,
                 require_reasoning=obj.require_reasoning,
                 return_hidden_states=obj.return_hidden_states,
+            steering_enabled=getattr(obj, "steering_enabled", None),
+            steering_scale=getattr(obj, "steering_scale", None),
                 return_routed_experts=obj.return_routed_experts,
                 data_parallel_rank=obj.data_parallel_rank,
                 priority=obj.priority,

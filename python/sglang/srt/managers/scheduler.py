@@ -1476,6 +1476,8 @@ class Scheduler(
                 routing_key=recv_req.routing_key,
                 http_worker_ipc=recv_req.http_worker_ipc,
                 dllm_config=self.dllm_config,
+                steering_enabled=getattr(recv_req, "steering_enabled", None),
+                steering_scale=getattr(recv_req, "steering_scale", None),
             )
             req.tokenizer = self.tokenizer
 

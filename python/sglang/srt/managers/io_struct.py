@@ -225,6 +225,10 @@ class GenerateReqInput(BaseReq, APIServingTimingMixin):
     # of `CustomLogitProcessor` in python/sglang/srt/sampling/custom_logit_processor.py
     # Use the processor's `to_str()` method to generate the serialized string.
     custom_logit_processor: Optional[Union[List[Optional[str]], str]] = None
+    
+    # Steering configuration for abliteration (per-request override)
+    steering_enabled: Optional[bool] = None  # None = use server default
+    steering_scale: Optional[float] = None   # None = use server default
 
     # For disaggregated inference
     bootstrap_host: Optional[Union[List[str], str]] = None
@@ -733,6 +737,8 @@ class TokenizedGenerateReqInput(BaseReq):
     # of `CustomLogitProcessor` in python/sglang/srt/sampling/custom_logit_processor.py
     # Use the processor's `to_str()` method to generate the serialized string.
     custom_logit_processor: Optional[str] = None
+    steering_enabled: Optional[bool] = None
+    steering_scale: Optional[float] = None
 
     # For disaggregated inference
     bootstrap_host: Optional[str] = None

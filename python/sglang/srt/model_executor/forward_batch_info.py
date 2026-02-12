@@ -497,7 +497,34 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
         device = model_runner.device
 
         # Copy steering config from model runner if available
-        ret.steering_config = getattr(model_runner, "steering_config", None)
+        # Copy steering config from model runner, with per-request override
+        base_config = getattr(model_runner, "steering_config", None)
+        if base_config is not None:
+            # Check for per-request override from any request in batch
+            override_enabled = None
+            override_scale = None
+            if hasattr(batch, "reqs") and batch.reqs:
+                for req in batch.reqs:
+                    if hasattr(req, "steering_enabled") and req.steering_enabled is not None:
+                        override_enabled = req.steering_enabled
+                    if hasattr(req, "steering_scale") and req.steering_scale is not None:
+                        override_scale = req.steering_scale
+            
+            # Apply overrides if present
+            if override_enabled is False:
+                ret.steering_config = None  # Disable steering for this batch
+            elif override_scale is not None:
+                # Create modified config with new scale
+                ret.steering_config = SteeringConfig(
+                    direction=base_config.direction,
+                    scale=override_scale,
+                    layers=base_config.layers,
+                    enabled=base_config.enabled
+                )
+            else:
+                ret.steering_config = base_config  # Use server default
+        else:
+            ret.steering_config = None
 
         if batch.extend_input_logprob_token_ids is not None:
             ret.extend_input_logprob_token_ids_gpu = (

@@ -545,6 +545,8 @@ class Req(ReqDllmMixin):
         routing_key: Optional[str] = None,
         dimensions: Optional[int] = None,
         http_worker_ipc: Optional[str] = None,
+        steering_enabled: Optional[bool] = None,
+        steering_scale: Optional[float] = None,
     ):
         # Input and output info
         self.rid = rid
@@ -584,6 +586,10 @@ class Req(ReqDllmMixin):
 
         # For multi-http worker
         self.http_worker_ipc = http_worker_ipc
+        
+        # Steering configuration
+        self.steering_enabled = steering_enabled
+        self.steering_scale = steering_scale
 
         # Require reasoning for the request (hybrid reasoning model only)
         self.require_reasoning = require_reasoning
