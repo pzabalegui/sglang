@@ -178,6 +178,22 @@ ToolCallConstraint: TypeAlias = Union[
 ]
 
 
+class SteeringRequest(BaseModel):
+    """Configuration for steering vector manipulation during inference.
+
+    Enables runtime abliteration by subtracting a refusal direction from
+    hidden states: h' = h - scale * (h·r̂) * r̂
+    """
+
+    enabled: bool = True
+    # Name of the preloaded steering vector to use
+    vector_name: str = "default"
+    # Scale factor for the projection (1.0 = full subtraction)
+    scale: float = 1.0
+    # Which layers to apply steering to. None = all layers
+    layers: Optional[List[int]] = None
+
+
 class FileRequest(BaseModel):
     # https://platform.openai.com/docs/api-reference/files/create
     file: bytes  # The File object (not file name) to be uploaded
@@ -616,6 +632,9 @@ class ChatCompletionRequest(BaseModel):
 
     # For data parallel rank routing
     data_parallel_rank: Optional[int] = None
+
+    # Steering vector configuration for abliteration
+    steering: Optional[SteeringRequest] = None
 
     # OpenAI/SGLang default sampling parameters
     _DEFAULT_SAMPLING_PARAMS = {

@@ -70,6 +70,76 @@ if TYPE_CHECKING:
 _is_npu = is_npu()
 
 
+@dataclass
+class SteeringConfig:
+    """Configuration for steering vector manipulation during inference.
+
+    This enables runtime abliteration by subtracting a refusal direction from
+    hidden states: h' = h - scale * (h·r̂) * r̂
+
+    Based on: "Refusal in Language Models Is Mediated by a Single Direction"
+    https://arxiv.org/abs/2406.11717
+    """
+    # The steering vector (refusal direction), shape: (hidden_size,)
+    direction: torch.Tensor
+    # Scale factor for the projection (1.0 = full subtraction)
+    scale: float = 1.0
+    # Which layers to apply steering to. None = all layers
+    layers: Optional[List[int]] = None
+    # Whether steering is enabled
+    enabled: bool = True
+
+    def should_apply_to_layer(self, layer_idx: int) -> bool:
+        """Check if steering should be applied to a specific layer."""
+        if not self.enabled:
+            return False
+        if self.layers is None:
+            return True
+        return layer_idx in self.layers
+
+
+def apply_steering(
+    hidden_states: torch.Tensor,
+    steering_config: Optional[SteeringConfig],
+    layer_idx: int,
+) -> torch.Tensor:
+    """Apply steering vector manipulation to hidden states.
+
+    Implements abliteration: h' = h - scale * (h·r̂) * r̂
+
+    Args:
+        hidden_states: Tensor of shape (batch_size * seq_len, hidden_size)
+        steering_config: Steering configuration with direction vector
+        layer_idx: Current layer index
+
+    Returns:
+        Modified hidden states with refusal direction projected out
+    """
+    if steering_config is None:
+        return hidden_states
+
+    if not steering_config.should_apply_to_layer(layer_idx):
+        return hidden_states
+
+    # Get the direction vector and ensure it's on the right device/dtype
+    direction = steering_config.direction.to(
+        device=hidden_states.device,
+        dtype=hidden_states.dtype
+    )
+
+    # Compute projection: (h · r̂) where r̂ is normalized
+    # direction should already be normalized, but normalize just in case
+    direction = direction / direction.norm()
+
+    # Project hidden states onto direction: scalar = h · r̂
+    proj_scalar = (hidden_states * direction).sum(dim=-1, keepdim=True)
+
+    # Subtract the projection: h' = h - scale * (h·r̂) * r̂
+    modified = hidden_states - steering_config.scale * proj_scalar * direction
+
+    return modified
+
+
 class ForwardMode(IntEnum):
     # Extend a sequence. The KV cache of the beginning part of the sequence is already computed (e.g., system prompt).
     # It is also called "prefill" in common terminology.
@@ -376,6 +446,9 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
     # For hidden states before normal
     return_hidden_states_before_norm: bool = False
 
+    # Steering vector configuration for abliteration
+    steering_config: Optional[SteeringConfig] = None
+
     @classmethod
     def init_new(
         cls,
@@ -422,6 +495,9 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             return_hidden_states_before_norm=batch.return_hidden_states_before_norm,
         )
         device = model_runner.device
+
+        # Copy steering config from model runner if available
+        ret.steering_config = getattr(model_runner, "steering_config", None)
 
         if batch.extend_input_logprob_token_ids is not None:
             ret.extend_input_logprob_token_ids_gpu = (

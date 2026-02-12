@@ -122,6 +122,7 @@ from sglang.srt.model_executor.forward_batch_info import (
     ForwardBatch,
     ForwardMode,
     PPProxyTensors,
+    SteeringConfig,
 )
 from sglang.srt.model_executor.hook_manager import register_forward_hooks
 from sglang.srt.model_executor.input_buffers import GraphInputBuffers
@@ -610,6 +611,11 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         if server_args.forward_hooks:
             register_forward_hooks(self.model, server_args.forward_hooks)
 
+        # Load steering vector if configured
+        self.steering_config = None
+        if server_args.steering_vector_path:
+            self._load_steering_vector(server_args)
+
         if self.eagle_use_aux_hidden_state:
             self.model.set_eagle3_layers_to_capture(
                 self.eagle_aux_hidden_state_layer_ids
@@ -619,6 +625,49 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         self.init_piecewise_cuda_graphs()
 
         self.prealloc_symmetric_memory_pool()
+
+    def _load_steering_vector(self, server_args: ServerArgs):
+        """Load steering vector from file and create SteeringConfig."""
+        vector_path = server_args.steering_vector_path
+        if not os.path.exists(vector_path):
+            logger.warning(f"Steering vector file not found: {vector_path}")
+            return
+
+        try:
+            # Load the vector - expected shape: (hidden_size,)
+            direction = torch.load(vector_path, map_location="cpu")
+
+            # Handle different tensor formats
+            if isinstance(direction, dict):
+                # If it's a state dict, try to get the direction
+                direction = direction.get("direction", direction.get("refusal_direction"))
+            if direction is None:
+                logger.warning(f"Could not extract direction from {vector_path}")
+                return
+
+            # Normalize the direction
+            direction = direction.float()
+            direction = direction / direction.norm()
+
+            # Move to device
+            device = torch.device(f"cuda:{self.gpu_id}" if self.device == "cuda" else self.device)
+            direction = direction.to(device)
+
+            self.steering_config = SteeringConfig(
+                direction=direction,
+                scale=server_args.steering_scale,
+                layers=server_args.steering_layers,
+                enabled=True,
+            )
+
+            logger.info(
+                f"Loaded steering vector from {vector_path}, "
+                f"shape={direction.shape}, scale={server_args.steering_scale}, "
+                f"layers={server_args.steering_layers or 'all'}"
+            )
+        except Exception as e:
+            logger.error(f"Failed to load steering vector: {e}")
+            self.steering_config = None
 
     def init_routed_experts_capturer(self):
         if not self.server_args.disable_shared_experts_fusion and hasattr(

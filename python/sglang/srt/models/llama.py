@@ -45,7 +45,11 @@ from sglang.srt.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
+from sglang.srt.model_executor.forward_batch_info import (
+    ForwardBatch,
+    PPProxyTensors,
+    apply_steering,
+)
 from sglang.srt.model_loader.weight_utils import (
     default_weight_loader,
     kv_cache_scales_loader,
@@ -388,6 +392,10 @@ class LlamaModel(nn.Module):
                 forward_batch,
                 residual,
             )
+            # Apply steering vector if configured
+            hidden_states = apply_steering(
+                hidden_states, forward_batch.steering_config, i
+            )
 
         if not self.pp_group.is_last_rank:
             return PPProxyTensors(
@@ -559,6 +567,10 @@ class LlamaForCausalLM(nn.Module):
                 forward_batch.hidden_states,
                 forward_batch,
                 forward_batch.residual,
+            )
+            # Apply steering vector if configured
+            forward_batch.hidden_states = apply_steering(
+                forward_batch.hidden_states, forward_batch.steering_config, i
             )
 
         if end == self.model.config.num_hidden_layers:

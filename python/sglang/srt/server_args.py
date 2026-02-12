@@ -696,6 +696,11 @@ class ServerArgs:
     # For forward hooks
     forward_hooks: Optional[List[dict[str, Any]]] = None
 
+    # Steering vectors (abliteration)
+    steering_vector_path: Optional[str] = None
+    steering_scale: float = 1.0
+    steering_layers: Optional[List[int]] = None
+
     def __post_init__(self):
         """
         Orchestrates the handling of various server arguments, ensuring proper configuration and validation.
@@ -4982,6 +4987,29 @@ class ServerArgs:
             type=json_list_type,
             default=ServerArgs.forward_hooks,
             help="JSON-formatted forward hook specifications to attach to the model.",
+        )
+
+        # Steering vectors (abliteration)
+        parser.add_argument(
+            "--steering-vector-path",
+            type=str,
+            default=ServerArgs.steering_vector_path,
+            help="Path to a .pt file containing the steering vector (refusal direction). "
+            "When provided, enables runtime abliteration to bypass refusal behavior.",
+        )
+        parser.add_argument(
+            "--steering-scale",
+            type=float,
+            default=ServerArgs.steering_scale,
+            help="Scale factor for steering vector projection (1.0 = full subtraction). "
+            "Higher values = stronger effect.",
+        )
+        parser.add_argument(
+            "--steering-layers",
+            type=json_list_type,
+            default=ServerArgs.steering_layers,
+            help="JSON list of layer indices to apply steering to. "
+            "Default: all layers. Example: [10, 11, 12, 13, 14]",
         )
 
     @classmethod
