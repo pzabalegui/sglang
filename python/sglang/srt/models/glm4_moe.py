@@ -77,7 +77,88 @@ from sglang.srt.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
-from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors, apply_steering
+
+# ============================================================
+# ACTIVATION CAPTURE for refusal direction extraction
+# ============================================================
+import json as _json
+import os as _os
+
+_CAPTURE_STORE = {}
+_CAPTURE_COUNTER = [0]
+_CAPTURE_CONFIG_CACHE = [None, 0]  # [config, last_check_time]
+
+def _get_capture_config():
+    """Read capture config with 1-second cache."""
+    import time
+    now = time.time()
+    if now - _CAPTURE_CONFIG_CACHE[1] < 1.0 and _CAPTURE_CONFIG_CACHE[0] is not None:
+        return _CAPTURE_CONFIG_CACHE[0]
+    _CAPTURE_CONFIG_CACHE[1] = now
+
+    config_path = "/tmp/capture_config.json"
+    if not _os.path.exists(config_path):
+        _CAPTURE_CONFIG_CACHE[0] = None
+        return None
+    try:
+        with open(config_path, "r") as f:
+            cfg = _json.load(f)
+        if not cfg.get("enabled", False):
+            _CAPTURE_CONFIG_CACHE[0] = None
+            return None
+        _CAPTURE_CONFIG_CACHE[0] = cfg
+        return cfg
+    except Exception:
+        _CAPTURE_CONFIG_CACHE[0] = None
+        return None
+
+
+def _maybe_capture(hidden_states, layer_idx, forward_batch, n_layers=92, residual=None):
+    """Capture hidden states during prefill for refusal direction extraction.
+    
+    Captures full representation (hidden_states + residual) for last token only,
+    to match what HuggingFace output_hidden_states provides.
+    """
+    import torch
+
+    cfg = _get_capture_config()
+    if cfg is None:
+        return
+
+    # Only capture during prefill (not decode)
+    if hidden_states.shape[0] <= 2:
+        return
+
+    # Only capture on rank 0 (all ranks have identical hidden_states after allreduce)
+    try:
+        import torch.distributed as dist
+        if dist.is_initialized() and dist.get_rank() != 0:
+            return
+    except Exception:
+        pass
+
+    target_layers = cfg.get("layers", list(range(n_layers)))
+    if layer_idx not in target_layers:
+        return
+
+    # Save last token's hidden state (where refusal signal is strongest)
+    # Compute full representation (h + residual) only for last token (memory efficient)
+    last_h = hidden_states[-1, :]
+    if residual is not None:
+        last_h = last_h + residual[-1, :]
+    _CAPTURE_STORE[layer_idx] = last_h.detach().cpu().to(torch.float32)
+
+    # When we reach the last target layer, save everything to disk
+    max_target = max(target_layers)
+    if layer_idx == max_target:
+        save_dir = cfg.get("save_dir", "/tmp/captures")
+        _os.makedirs(save_dir, exist_ok=True)
+        sample_id = _CAPTURE_COUNTER[0]
+        save_path = _os.path.join(save_dir, f"sample_{sample_id}.pt")
+        torch.save(dict(_CAPTURE_STORE), save_path)
+        _CAPTURE_STORE.clear()
+        _CAPTURE_COUNTER[0] += 1
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.deepseek_v2 import DeepseekV2ForCausalLM
 from sglang.srt.models.utils import apply_qk_norm
@@ -795,6 +876,12 @@ class Glm4MoeDecoderLayer(nn.Module):
             )
         )
 
+        # Disable allreduce fusion when steering is active - steering requires
+        # fully all-reduced hidden_states to compute correct projections
+        if should_allreduce_fusion and forward_batch.steering_config is not None:
+            if forward_batch.steering_config.enabled:
+                should_allreduce_fusion = False
+
         # For DP with padding, reduce scatter can be used instead of all-reduce.
         use_reduce_scatter = self.layer_communicator.should_use_reduce_scatter(
             forward_batch
@@ -968,6 +1055,14 @@ class Glm4MoeModel(nn.Module):
                     forward_batch,
                     residual,
                 )
+                # POST-LAYER steering (H3+H4 fix): aplica sobre representación completa h+residual
+                # El vector fue extraído de este espacio → proyección geométricamente correcta
+                if forward_batch.steering_config is not None:
+                    from sglang.srt.model_executor.forward_batch_info import apply_steering
+                    hidden_states = apply_steering(
+                        hidden_states, forward_batch.steering_config, i, residual=residual
+                    )
+                _maybe_capture(hidden_states, i, forward_batch, n_layers=len(self.layers), residual=residual)
 
         if normal_end_layer != self.end_layer:
             hidden_states, residual = model_forward_maybe_tbo(

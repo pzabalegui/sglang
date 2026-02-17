@@ -318,7 +318,7 @@ class OpenAIServingChat(OpenAIServingBase):
             image_max_dynamic_patch=img_max_dynamic_patch,
             video_max_dynamic_patch=vid_max_dynamic_patch,
             max_dynamic_patch=getattr(request, "max_dynamic_patch", None),
-            # Steering parameters for per-request abliteration control
+            # Per-request steering override
             steering_enabled=request.steering.enabled if request.steering else None,
             steering_scale=request.steering.scale if request.steering else None,
         )
@@ -395,6 +395,20 @@ class OpenAIServingChat(OpenAIServingBase):
             )
             messages = request.messages
             messages = [msg.model_dump() for msg in messages]
+
+            for msg in messages:
+                if msg.get("content") is None:
+                    msg["content"] = ""
+                processed_msg = process_content_for_template_format(
+                    msg,
+                    template_content_format,
+                    image_data,
+                    video_data,
+                    audio_data,
+                    modalities,
+                    use_dpsk_v32_encoding=self.use_dpsk_v32_encoding,
+                )
+                msg.update(processed_msg)
 
             # Handle continue_final_message: separate final assistant message
             messages, assistant_prefix = self._handle_last_assistant_message(

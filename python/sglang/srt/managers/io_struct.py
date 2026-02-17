@@ -225,10 +225,6 @@ class GenerateReqInput(BaseReq, APIServingTimingMixin):
     # of `CustomLogitProcessor` in python/sglang/srt/sampling/custom_logit_processor.py
     # Use the processor's `to_str()` method to generate the serialized string.
     custom_logit_processor: Optional[Union[List[Optional[str]], str]] = None
-    
-    # Steering configuration for abliteration (per-request override)
-    steering_enabled: Optional[bool] = None  # None = use server default
-    steering_scale: Optional[float] = None   # None = use server default
 
     # For disaggregated inference
     bootstrap_host: Optional[Union[List[str], str]] = None
@@ -282,6 +278,10 @@ class GenerateReqInput(BaseReq, APIServingTimingMixin):
     min_dynamic_patch: Optional[int] = None
     image_max_dynamic_patch: Optional[int] = None
     video_max_dynamic_patch: Optional[int] = None
+
+    # Per-request steering override (None = usar config global del servidor)
+    steering_enabled: Optional[bool] = None
+    steering_scale: Optional[float] = None
 
     def contains_mm_input(self) -> bool:
         return (
@@ -737,8 +737,6 @@ class TokenizedGenerateReqInput(BaseReq):
     # of `CustomLogitProcessor` in python/sglang/srt/sampling/custom_logit_processor.py
     # Use the processor's `to_str()` method to generate the serialized string.
     custom_logit_processor: Optional[str] = None
-    steering_enabled: Optional[bool] = None
-    steering_scale: Optional[float] = None
 
     # For disaggregated inference
     bootstrap_host: Optional[str] = None
@@ -776,6 +774,10 @@ class TokenizedGenerateReqInput(BaseReq):
 
     need_wait_for_image: bool = False
     num_items_assigned: Optional[List] = None
+
+    # Per-request steering override
+    steering_enabled: Optional[bool] = None
+    steering_scale: Optional[float] = None
 
 
 @dataclass
@@ -1315,6 +1317,8 @@ class UpdateWeightFromDiskReqInput(BaseReq):
     token_step: int = 0
     # Whether to flush the cache after updating weights
     flush_cache: bool = True
+    # Tensor metadata
+    manifest: Optional[Dict[str, Any]] = None
 
 
 @dataclass
