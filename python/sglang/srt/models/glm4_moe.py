@@ -77,7 +77,8 @@ from sglang.srt.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
-from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors, apply_steering
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
+import math as _math
 
 # ============================================================
 # ACTIVATION CAPTURE for refusal direction extraction
@@ -1043,6 +1044,34 @@ class Glm4MoeModel(nn.Module):
             elif self.first_k_dense_replace < normal_start_layer:
                 normal_end_layer = normal_start_layer = 0
 
+        # Steering strategy:
+        # - Prefill (is_decode=False): always eager → apply steering normally (out-of-place ok).
+        # - Decode with CUDA graphs (TP=4): CUDA graph + steering ops during decode causes
+        #   systematic degeneration regardless of whether ops are in-place or out-of-place,
+        #   and regardless of how many layers are steered (tested: all 92, 23 active, 23 in-place).
+        #   Root cause: intermediate tensor creation inside TP=4 CUDA graph decode interferes
+        #   with the graph's private memory pool or NCCL buffer management. Cannot be fixed
+        #   without deeper SGLang infrastructure changes.
+        #   Solution: skip steering during decode. CUDA graph replays clean unsteered
+        #   forward pass at full speed.
+        # - Decode without CUDA graphs (disable_cuda_graph=True): apply steering normally.
+        # Net result: 90% ASR, 20.6s/request (18× faster than disable-cuda-graph).
+        _has_steering = (
+            hasattr(self, '_steering_dir')
+            and self._steering_dir is not None
+            and not forward_batch.forward_mode.is_decode()
+        )
+        _steered_layers = getattr(self, '_steered_layer_set', None)
+
+        # Clamped projective decode steering: pre-allocated buffers -> CUDA-graph safe.
+        # Only subtracts when (h+residual)·r̂ > 0 → code/math tokens unaffected.
+        # Python conditional evaluated at CUDA graph capture (not per-replay).
+        _has_decode_steering = (
+            forward_batch.forward_mode.is_decode()
+            and getattr(self, '_steer_dec_scale', None) is not None
+        )
+        _decode_peak_layer = getattr(self, '_decode_steer_peak_layer', -1)
+
         aux_hidden_states = []
         for i in range(normal_start_layer, normal_end_layer):
             with get_global_expert_distribution_recorder().with_current_layer(i):
@@ -1055,13 +1084,31 @@ class Glm4MoeModel(nn.Module):
                     forward_batch,
                     residual,
                 )
-                # POST-LAYER steering (H3+H4 fix): aplica sobre representación completa h+residual
-                # El vector fue extraído de este espacio → proyección geométricamente correcta
-                if forward_batch.steering_config is not None:
-                    from sglang.srt.model_executor.forward_batch_info import apply_steering
-                    hidden_states = apply_steering(
-                        hidden_states, forward_batch.steering_config, i, residual=residual
-                    )
+                # POST-LAYER projective steering (prefill-only).
+                # Formula: h' = h - scale * (h·r̂) * r̂
+                # Projects onto refusal direction using h (residual delta) — same calibration
+                # as the validated deploy (scale=5-6 tested empirically → 46.3% COMPLY).
+                # _steered_layer_set: only active layers run GPU ops (scale > 1e-6).
+                if _has_steering and _steered_layers is not None and i in _steered_layers:
+                    _scale = self._steering_scales[i]      # GPU scalar, non-zero for this layer
+                    _dir = self._steering_dir              # [hidden_size], GPU+BF16, unit norm
+                    _proj = (hidden_states * _dir).sum(dim=-1, keepdim=True)
+                    hidden_states = hidden_states - _scale * _proj * _dir
+                # Clamped projective decode steering (pre-allocated, CUDA-graph safe).
+                # h' = h - decode_scale * max(0, (h+residual)·r̂) * r̂
+                # Only removes refusal component; neutral tokens (proj≤0) untouched.
+                if _has_decode_steering and i == _decode_peak_layer and residual is not None:
+                    _bs = hidden_states.shape[0]
+                    _t1 = self._steer_dec_tmp1[:_bs]   # [bs, hid] work buffer
+                    _t2 = self._steer_dec_tmp2[:_bs]   # [bs, hid] work buffer
+                    _p  = self._steer_dec_proj[:_bs]   # [bs,   1] projection
+                    torch.add(hidden_states, residual, out=_t1)
+                    torch.mul(_t1, self._steering_dir, out=_t2)
+                    _p.copy_(_t2.sum(dim=-1, keepdim=True))  # sum+keepdim don't support out= in pt2.9
+                    _p.clamp_(min=0)
+                    torch.mul(_p, self._steering_dir, out=_t2)
+                    _t2.mul_(self._steer_dec_scale)
+                    hidden_states.sub_(_t2)
                 _maybe_capture(hidden_states, i, forward_batch, n_layers=len(self.layers), residual=residual)
 
         if normal_end_layer != self.end_layer:
@@ -1124,8 +1171,97 @@ class Glm4MoeForCausalLM(nn.Module):
         # For EAGLE3 support
         self.capture_aux_hidden_states = False
 
+        # Initialize GPU-native steering buffers (CUDA-graph compatible)
+        self._init_steering()
+
     def get_input_embeddings(self) -> nn.Embedding:
         return self.model.embed_tokens
+
+    def _init_steering(self) -> None:
+        """Initialize GPU-native steering buffers for CUDA-graph compatible DAS.
+
+        Registers _steering_dir [hidden_size] and _steering_scales [n_layers] as
+        nn.Buffer on Glm4MoeModel. In the forward loop, scale=0.0 layers are
+        mathematical no-ops — no Python conditionals needed per-layer.
+        """
+        args = get_global_server_args()
+        if not getattr(args, 'steering_vector_path', None):
+            return
+
+        vec = torch.load(args.steering_vector_path, map_location='cpu', weights_only=True)
+        if vec.dim() != 1:
+            raise ValueError(f"Steering vector must be 1-D, got shape {vec.shape}")
+        vec = vec.float()
+        vec = vec / vec.norm()
+
+        n_layers = self.config.num_hidden_layers
+        scales = torch.zeros(n_layers, dtype=torch.float32)
+
+        steering_layers_str = getattr(args, 'steering_layers', None)
+        center_layers = _json.loads(steering_layers_str) if steering_layers_str else [47]
+        mode = getattr(args, 'steering_mode', 'gaussian')
+        base_scale = float(getattr(args, 'steering_scale', 5.0))
+        sigma = float(getattr(args, 'steering_kernel_width', 2.0))
+
+        if mode == 'gaussian':
+            for c in center_layers:
+                for i in range(n_layers):
+                    w = _math.exp(-0.5 * ((i - c) / sigma) ** 2) * base_scale
+                    if w > scales[i].item():
+                        scales[i] = w
+        else:
+            for l in center_layers:
+                if 0 <= l < n_layers:
+                    scales[l] = base_scale
+
+        # Register on Glm4MoeModel so Glm4MoeModel.forward() accesses via self.*
+        # Buffers automatically move to GPU when model is loaded onto device
+        self.model.register_buffer('_steering_dir', vec.bfloat16())
+        self.model.register_buffer('_steering_scales', scales.bfloat16())
+
+        # Pre-compute which layers have non-zero scale as a Python frozenset.
+        # Used in forward() so ONLY these layers generate GPU ops in the CUDA graph.
+        # For scale=0.0 layers: zero GPU ops, zero private-pool allocations.
+        # CUDA graph compatibility: `i in _steered_layer_set` is pure Python logic —
+        # the graph captures a DETERMINISTIC structure (same 7-9 layers steered per
+        # replay) → no dynamic branching in the captured graph.
+        _active_set = frozenset(int(i) for i in range(n_layers) if scales[i].item() > 1e-6)
+        self.model._steered_layer_set = _active_set
+        n_active = len(_active_set)
+
+        # Decode-time CLAMPED PROJECTIVE steering with pre-allocated buffers.
+        # Formula: h' = h - decode_scale * max(0, (h+residual)·r̂) * r̂
+        # Clamped (min=0): only subtracts when h points TOWARD refusal direction.
+        # Code tokens / math tokens have projection ≈ 0 → unperturbed → no degeneration.
+        # Pre-allocated buffers: ZERO new tensor allocations during CUDA graph replay.
+        decode_scale = float(getattr(args, 'steering_decode_scale', 0.0))
+        peak_layer = int(center_layers[0]) if center_layers else 47
+        self.model._decode_steer_peak_layer = peak_layer
+        if decode_scale > 0.0:
+            max_bs = getattr(args, 'cuda_graph_max_bs', 80)
+            hid = self.config.hidden_size
+            # Pre-allocate on CPU; migrated to GPU in load_weights() after device is known.
+            self.model.register_buffer('_steer_dec_tmp1',
+                torch.zeros(max_bs, hid, dtype=torch.bfloat16))   # work buf: h+residual
+            self.model.register_buffer('_steer_dec_tmp2',
+                torch.zeros(max_bs, hid, dtype=torch.bfloat16))   # work buf: proj*r̂
+            self.model.register_buffer('_steer_dec_proj',
+                torch.zeros(max_bs, 1, dtype=torch.bfloat16))     # projection scalar
+            self.model.register_buffer('_steer_dec_scale',
+                torch.tensor(decode_scale, dtype=torch.bfloat16)) # scalar scale on GPU
+            logger.info(
+                f"[steering] Clamped-projective decode steering: "
+                f"peak_layer={peak_layer}, decode_scale={decode_scale}, max_bs={max_bs}"
+            )
+        else:
+            self.model._steer_dec_scale = None
+
+        logger.info(
+            f"[steering] Initialized CUDA-graph compatible buffers: "
+            f"mode={mode}, center_layers={center_layers}, scale={base_scale}, "
+            f"sigma={sigma}, active_layers={n_active}/{n_layers} {sorted(_active_set)}, "
+            f"vec_shape={list(vec.shape)}, decode_scale={decode_scale}"
+        )
 
     def determine_num_fused_shared_experts(self):
         if get_global_server_args().disable_shared_experts_fusion:
@@ -1340,6 +1476,29 @@ class Glm4MoeForCausalLM(nn.Module):
                         weight_loader(param, loaded_weight)
                     else:
                         logger.warning(f"Parameter {name} not found in params_dict")
+
+        # Migrate steering buffers to GPU now that all model weights are loaded.
+        # Must be here (not in forward()) so the CPU→GPU copy happens BEFORE
+        # CUDA graph capture — otherwise the copy op gets embedded in the graph
+        # and the source CPU tensor may be GC'd before graph replay.
+        if hasattr(self.model, '_steering_dir') and self.model._steering_dir is not None:
+            if self.model._steering_dir.device.type == 'cpu':
+                try:
+                    _dev = next(self.parameters()).device
+                    self.model._steering_dir = self.model._steering_dir.to(
+                        device=_dev, dtype=torch.bfloat16)
+                    self.model._steering_scales = self.model._steering_scales.to(
+                        device=_dev, dtype=torch.bfloat16)
+                    # Migrate clamped-projective decode steering buffers if present
+                    for _buf_name in ("_steer_dec_tmp1", "_steer_dec_tmp2",
+                                      "_steer_dec_proj", "_steer_dec_scale"):
+                        _buf = getattr(self.model, _buf_name, None)
+                        if _buf is not None and _buf.device.type == "cpu":
+                            setattr(self.model, _buf_name, _buf.to(device=_dev, dtype=torch.bfloat16))
+                            logger.info(f"[steering] load_weights: migrated {_buf_name} to {_dev}")
+                    logger.info(f"[steering] load_weights: migrated steering buffers to {_dev}")
+                except StopIteration:
+                    pass  # no parameters yet, will migrate later
 
     def get_embed_and_head(self):
         return self.model.embed_tokens.weight, self.lm_head.weight

@@ -226,6 +226,11 @@ class GenerateReqInput(BaseReq, APIServingTimingMixin):
     # Use the processor's `to_str()` method to generate the serialized string.
     custom_logit_processor: Optional[Union[List[Optional[str]], str]] = None
 
+    # Per-request steering override (None = use server global config)
+    # Set via {"steering": {"enabled": true/false, "scale": 6.0}} in the curl body
+    steering_enabled: Optional[bool] = None
+    steering_scale: Optional[float] = None
+
     # For disaggregated inference
     bootstrap_host: Optional[Union[List[str], str]] = None
     bootstrap_port: Optional[Union[List[Optional[int]], int]] = None

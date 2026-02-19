@@ -703,6 +703,7 @@ class ServerArgs:
     steering_layers: Optional[str] = None  # e.g. '[62]' or '[47,48,49]'
     steering_mode: str = "gaussian"  # "single" | "gaussian"
     steering_kernel_width: float = 10.0
+    steering_decode_scale: float = 0.0  # additive decode steering scale (0 = disabled)
 
     def __post_init__(self):
         """
@@ -5073,6 +5074,12 @@ class ServerArgs:
             type=float,
             default=ServerArgs.steering_kernel_width,
             help="Width (sigma) of Gaussian kernel for multi-layer steering.",
+        )
+        parser.add_argument(
+            "--steering-decode-scale",
+            type=float,
+            default=ServerArgs.steering_decode_scale,
+            help="Scale for additive decode-time steering (0=disabled). Applied in-place at peak layer.",
         )
 
     @classmethod
