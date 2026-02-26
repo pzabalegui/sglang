@@ -45,6 +45,7 @@ from sglang.srt.distributed.parallel_state import (
 from sglang.srt.layers.attention.nsa.utils import NSAContextParallelMetadata
 from sglang.srt.layers.dp_attention import (
     DpPaddingMode,
+    get_attention_cp_size,
     get_attention_dp_rank,
     get_attention_tp_rank,
     get_attention_tp_size,
@@ -326,7 +327,7 @@ class CaptureHiddenMode(IntEnum):
 
 
 def compute_local_num_token_non_padded(
-    global_num_token_non_padded: torch.Tensor | int,
+    global_num_token_non_padded: torch.Tensor,
     num_tokens_per_dp: int,
 ) -> torch.Tensor:
     """Compute local non-padded token count for this attention-TP rank.
@@ -337,10 +338,6 @@ def compute_local_num_token_non_padded(
     attn_tp_rank = get_attention_tp_rank()
     attn_tp_size = get_attention_tp_size()
     tokens_per_rank = num_tokens_per_dp // attn_tp_size
-
-    # Make sure global_num_token_non_padded is tensor so torch.clamp doesn't break
-    if isinstance(global_num_token_non_padded, int):
-        global_num_token_non_padded = torch.tensor(global_num_token_non_padded)
 
     return torch.clamp(
         global_num_token_non_padded - tokens_per_rank * attn_tp_rank,
@@ -503,6 +500,9 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
     # Per-request decode scale override (None = use server default)
     steering_decode_scale_override: float = None
 
+    # For dumper: request IDs for cross-step sequence tracking
+    rids: Optional[List[str]] = None
+
     @classmethod
     def init_new(
         cls,
@@ -547,6 +547,7 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             tbo_split_seq_index=batch.tbo_split_seq_index,
             dimensions=batch.dimensions,
             return_hidden_states_before_norm=batch.return_hidden_states_before_norm,
+            rids=[req.rid for req in batch.reqs],
         )
         device = model_runner.device
 
@@ -722,7 +723,7 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             num_tokens_per_dp = self.global_num_tokens_cpu[0]
 
         self.num_token_non_padded = compute_local_num_token_non_padded(
-            global_num_token_non_padded=self.num_token_non_padded_cpu,
+            global_num_token_non_padded=self.num_token_non_padded,
             num_tokens_per_dp=num_tokens_per_dp,
         )
 
@@ -929,6 +930,11 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             # make sure that the padded length is divisible by attn_tp_size because we may need reduce-scatter across attn_tp dim.
             # there is no reduce-scatter in LM logprob, so we do not need to adjust the padded length for logprob
             global_num_tokens[i] = ceil_align(global_num_tokens[i], attn_tp_size)
+
+        # make sure that each rank has the same number of tokens to do collective communication.
+        attn_cp_size = get_attention_cp_size()
+        for i in range(sync_group_size):
+            global_num_tokens[i] = ceil_align(global_num_tokens[i], attn_cp_size)
 
         dp_padding_mode = DpPaddingMode.get_dp_padding_mode(
             self.is_extend_in_batch, global_num_tokens
