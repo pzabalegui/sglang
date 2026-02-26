@@ -521,7 +521,6 @@ class Req(ReqDllmMixin):
         steering_enabled: Optional[bool] = None,
         steering_scale: Optional[float] = None,
         steering_decode_scale: Optional[float] = None,
-
         time_stats: Optional[
             Union[APIServerReqTimeStats, DPControllerReqTimeStats]
         ] = None,

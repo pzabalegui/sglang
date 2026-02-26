@@ -313,7 +313,9 @@ class OpenAIServingChat(OpenAIServingBase):
             # Per-request steering override
             steering_enabled=request.steering.enabled if request.steering else None,
             steering_scale=request.steering.scale if request.steering else None,
-            steering_decode_scale=request.steering.decode_scale if request.steering else None,
+            steering_decode_scale=(
+                request.steering.decode_scale if request.steering else None
+            ),
         )
 
         return adapted_request, request

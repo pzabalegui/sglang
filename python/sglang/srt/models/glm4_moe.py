@@ -14,7 +14,13 @@
 
 """Inference-only GLM-4.5, GLM-4.6 and GLM-4.7 model compatible with HuggingFace weights"""
 
+# ============================================================
+# ACTIVATION CAPTURE for refusal direction extraction
+# ============================================================
+import json as _json
 import logging
+import math as _math
+import os as _os
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
@@ -78,21 +84,16 @@ from sglang.srt.layers.vocab_parallel_embedding import (
 )
 from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
-import math as _math
-
-# ============================================================
-# ACTIVATION CAPTURE for refusal direction extraction
-# ============================================================
-import json as _json
-import os as _os
 
 _CAPTURE_STORE = {}
 _CAPTURE_COUNTER = [0]
 _CAPTURE_CONFIG_CACHE = [None, 0]  # [config, last_check_time]
 
+
 def _get_capture_config():
     """Read capture config with 1-second cache."""
     import time
+
     now = time.time()
     if now - _CAPTURE_CONFIG_CACHE[1] < 1.0 and _CAPTURE_CONFIG_CACHE[0] is not None:
         return _CAPTURE_CONFIG_CACHE[0]
@@ -117,7 +118,7 @@ def _get_capture_config():
 
 def _maybe_capture(hidden_states, layer_idx, forward_batch, n_layers=92, residual=None):
     """Capture hidden states during prefill for refusal direction extraction.
-    
+
     Captures full representation (hidden_states + residual) for last token only,
     to match what HuggingFace output_hidden_states provides.
     """
@@ -134,6 +135,7 @@ def _maybe_capture(hidden_states, layer_idx, forward_batch, n_layers=92, residua
     # Only capture on rank 0 (all ranks have identical hidden_states after allreduce)
     try:
         import torch.distributed as dist
+
         if dist.is_initialized() and dist.get_rank() != 0:
             return
     except Exception:
@@ -160,6 +162,8 @@ def _maybe_capture(hidden_states, layer_idx, forward_batch, n_layers=92, residua
         torch.save(dict(_CAPTURE_STORE), save_path)
         _CAPTURE_STORE.clear()
         _CAPTURE_COUNTER[0] += 1
+
+
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.deepseek_v2 import DeepseekV2ForCausalLM
 from sglang.srt.models.utils import apply_qk_norm
@@ -253,7 +257,7 @@ class _DecodeSteeringHook:
             return output
 
         # Skip only if ALL requests have steering off
-        if getattr(forward_batch, 'steering_disabled', False):
+        if getattr(forward_batch, "steering_disabled", False):
             return output
 
         if residual is None or self.layer_weight < 1e-6:
@@ -269,29 +273,31 @@ class _DecodeSteeringHook:
         mom = self.momentum[:bs]  # [bs, 1]
 
         # Build per-request mask [bs, 1] from forward_batch
-        _mask_vals = getattr(forward_batch, 'steering_mask_values', None)
+        _mask_vals = getattr(forward_batch, "steering_mask_values", None)
         if _mask_vals is not None:
             mask = torch.tensor(
-                _mask_vals[:bs], device=hidden_states.device,
-                dtype=hidden_states.dtype).unsqueeze(1)
+                _mask_vals[:bs], device=hidden_states.device, dtype=hidden_states.dtype
+            ).unsqueeze(1)
         else:
             mask = None
 
         # Fold per-request decode scale overrides into mask
-        _scale_vals = getattr(forward_batch, 'steering_decode_scale_values', None)
+        _scale_vals = getattr(forward_batch, "steering_decode_scale_values", None)
         if _scale_vals is not None:
             _base = cfg.get("base_scale", 1.0)
             if _base > 0:
                 _ratios = [
-                    float(_scale_vals[i]) / _base
-                    if i < len(_scale_vals) and _scale_vals[i] is not None
-                    else 1.0
+                    (
+                        float(_scale_vals[i]) / _base
+                        if i < len(_scale_vals) and _scale_vals[i] is not None
+                        else 1.0
+                    )
                     for i in range(bs)
                 ]
                 if any(abs(r - 1.0) > 1e-6 for r in _ratios):
                     _rt = torch.tensor(
-                        _ratios, device=hidden_states.device,
-                        dtype=hidden_states.dtype).unsqueeze(1)
+                        _ratios, device=hidden_states.device, dtype=hidden_states.dtype
+                    ).unsqueeze(1)
                     mask = _rt if mask is None else mask * _rt
 
         h_plus_r = hidden_states + residual
@@ -308,7 +314,8 @@ class _DecodeSteeringHook:
 
             # Per-request sigmoid adaptive scale (pure tensor ops)
             sig = torch.sigmoid(
-                (mom - cfg["sigmoid_center"]) * cfg["sigmoid_steepness"])
+                (mom - cfg["sigmoid_center"]) * cfg["sigmoid_steepness"]
+            )
             adaptive_scale = (
                 cfg["base_scale"] * self.layer_weight * sig * cfg["max_scale_mult"]
             )  # [bs, 1]
@@ -1022,12 +1029,12 @@ class Glm4MoeDecoderLayer(nn.Module):
         # At this point hidden_states is the fully-reduced attention output after layernorm.
         # This is the correct point to project out refusal from attention contribution.
         # v3: loops over k directions per layer (k=1 for v2 backward compat).
-        if steering_ctx is not None and steering_ctx.get('attn_active'):
+        if steering_ctx is not None and steering_ctx.get("attn_active"):
             _layer_id = self.layer_id
-            if _layer_id in steering_ctx['attn_set']:
-                _dirs_k = steering_ctx['dirs'][_layer_id]  # [k, hidden_size]
-                _s = steering_ctx['attn_scales'][_layer_id]
-                _k = steering_ctx['k']
+            if _layer_id in steering_ctx["attn_set"]:
+                _dirs_k = steering_ctx["dirs"][_layer_id]  # [k, hidden_size]
+                _s = steering_ctx["attn_scales"][_layer_id]
+                _k = steering_ctx["k"]
                 for _ki in range(_k):
                     _dir = _dirs_k[_ki]
                     _proj = (hidden_states * _dir).sum(dim=-1, keepdim=True)
@@ -1047,7 +1054,9 @@ class Glm4MoeDecoderLayer(nn.Module):
                 should_allreduce_fusion = False
         # Also disable for DAS v2 MLP steering
         if should_allreduce_fusion and steering_ctx is not None:
-            if steering_ctx.get('mlp_active') and self.layer_id in steering_ctx.get('mlp_set', set()):
+            if steering_ctx.get("mlp_active") and self.layer_id in steering_ctx.get(
+                "mlp_set", set()
+            ):
                 should_allreduce_fusion = False
 
         # For DP with padding, reduce scatter can be used instead of all-reduce.
@@ -1062,12 +1071,12 @@ class Glm4MoeDecoderLayer(nn.Module):
         # DAS v2/v3: post-MoE steering (after MLP/MoE output, before residual add)
         # This targets the MLP contribution to refusal specifically.
         # v3: loops over k directions per layer.
-        if steering_ctx is not None and steering_ctx.get('mlp_active'):
+        if steering_ctx is not None and steering_ctx.get("mlp_active"):
             _layer_id = self.layer_id
-            if _layer_id in steering_ctx['mlp_set']:
-                _dirs_k = steering_ctx['dirs'][_layer_id]  # [k, hidden_size]
-                _s = steering_ctx['mlp_scales'][_layer_id]
-                _k = steering_ctx['k']
+            if _layer_id in steering_ctx["mlp_set"]:
+                _dirs_k = steering_ctx["dirs"][_layer_id]  # [k, hidden_size]
+                _s = steering_ctx["mlp_scales"][_layer_id]
+                _k = steering_ctx["k"]
                 for _ki in range(_k):
                     _dir = _dirs_k[_ki]
                     _proj = (hidden_states * _dir).sum(dim=-1, keepdim=True)
@@ -1232,36 +1241,38 @@ class Glm4MoeModel(nn.Module):
         _is_prefill = not forward_batch.forward_mode.is_decode()
 
         # Per-request steering toggle
-        _steering_off = getattr(forward_batch, 'steering_disabled', False)
+        _steering_off = getattr(forward_batch, "steering_disabled", False)
 
         # DAS v2/v3: multi-point steering context (attn + MLP intervention)
-        _steering_v2 = getattr(self, '_steering_v2', False) and _is_prefill and not _steering_off
-        _steering_k = getattr(self, '_steering_k', 1)
+        _steering_v2 = (
+            getattr(self, "_steering_v2", False) and _is_prefill and not _steering_off
+        )
+        _steering_k = getattr(self, "_steering_k", 1)
 
         # Post-layer steering (v1 compatible): projects refusal from hidden_states
         # When v2 is active, post-layer steering is skipped to avoid double-steering
         # (v2 already steers at attn + MLP points within the layer).
         _has_steering = (
-            hasattr(self, '_steering_dir')
+            hasattr(self, "_steering_dir")
             and self._steering_dir is not None
             and _is_prefill
             and not _steering_v2
             and not _steering_off
         )
-        _steered_layers = getattr(self, '_steered_layer_set', None)
+        _steered_layers = getattr(self, "_steered_layer_set", None)
         _steering_ctx = None
         if _steering_v2:
-            _attn_set = getattr(self, '_attn_steered_layer_set', frozenset())
-            _mlp_set = getattr(self, '_mlp_steered_layer_set', frozenset())
+            _attn_set = getattr(self, "_attn_steered_layer_set", frozenset())
+            _mlp_set = getattr(self, "_mlp_steered_layer_set", frozenset())
             _steering_ctx = {
-                'dirs': self._steering_dirs,           # [n_layers, k, hidden_size]
-                'attn_scales': self._steering_attn_scales,  # [n_layers]
-                'mlp_scales': self._steering_mlp_scales,    # [n_layers]
-                'attn_set': _attn_set,
-                'mlp_set': _mlp_set,
-                'attn_active': len(_attn_set) > 0,
-                'mlp_active': len(_mlp_set) > 0,
-                'k': _steering_k,
+                "dirs": self._steering_dirs,  # [n_layers, k, hidden_size]
+                "attn_scales": self._steering_attn_scales,  # [n_layers]
+                "mlp_scales": self._steering_mlp_scales,  # [n_layers]
+                "attn_set": _attn_set,
+                "mlp_set": _mlp_set,
+                "attn_active": len(_attn_set) > 0,
+                "mlp_active": len(_mlp_set) > 0,
+                "k": _steering_k,
             }
 
         # Clamped projective decode steering: pre-allocated buffers -> CUDA-graph safe.
@@ -1269,30 +1280,38 @@ class Glm4MoeModel(nn.Module):
         # v4: momentum-adaptive scaling in eager mode (--disable-cuda-graph)
         _has_decode_steering = (
             forward_batch.forward_mode.is_decode()
-            and getattr(self, '_steer_dec_scale', None) is not None
+            and getattr(self, "_steer_dec_scale", None) is not None
             and not _steering_off
         )
-        _decode_peak_layer = getattr(self, '_decode_steer_peak_layer', -1)
-        _decode_steered_set = getattr(self, '_decode_steered_set', frozenset())
-        _has_multi_layer_decode = getattr(self, '_has_multi_layer_decode', False)
-        _v4_adaptive = getattr(self, '_v4_adaptive', False)
+        _decode_peak_layer = getattr(self, "_decode_steer_peak_layer", -1)
+        _decode_steered_set = getattr(self, "_decode_steered_set", frozenset())
+        _has_multi_layer_decode = getattr(self, "_has_multi_layer_decode", False)
+        _v4_adaptive = getattr(self, "_v4_adaptive", False)
 
         # v4: Reset momentum at prefill (new sequence start)
-        if _is_prefill and _v4_adaptive and hasattr(self, '_steer_momentum'):
+        if _is_prefill and _v4_adaptive and hasattr(self, "_steer_momentum"):
             self._steer_momentum.zero_()
 
         # Per-request mask + decode scale override (eager mode: set mask from forward_batch)
         _saved_steering_mask = None
-        if _has_decode_steering and hasattr(self, '_steering_mask') and self._steering_mask is not None:
+        if (
+            _has_decode_steering
+            and hasattr(self, "_steering_mask")
+            and self._steering_mask is not None
+        ):
             _bs_fb = forward_batch.batch_size
-            _mask_vals_fb = getattr(forward_batch, 'steering_mask_values', None)
-            _scale_vals_fb = getattr(forward_batch, 'steering_decode_scale_values', None)
+            _mask_vals_fb = getattr(forward_batch, "steering_mask_values", None)
+            _scale_vals_fb = getattr(
+                forward_batch, "steering_decode_scale_values", None
+            )
             _saved_steering_mask = self._steering_mask[:_bs_fb].clone()
             if _mask_vals_fb is not None:
                 _bs_actual = min(len(_mask_vals_fb), _bs_fb)
                 self._steering_mask[:_bs_actual, 0] = torch.tensor(
-                    _mask_vals_fb[:_bs_actual], dtype=self._steering_mask.dtype,
-                    device=self._steering_mask.device)
+                    _mask_vals_fb[:_bs_actual],
+                    dtype=self._steering_mask.dtype,
+                    device=self._steering_mask.device,
+                )
             else:
                 self._steering_mask[:_bs_fb].fill_(1.0)
             # Fold per-request decode scale overrides into mask
@@ -1301,7 +1320,9 @@ class Glm4MoeModel(nn.Module):
                 if _global_default > 0:
                     for _si in range(min(len(_scale_vals_fb), _bs_fb)):
                         if _scale_vals_fb[_si] is not None:
-                            self._steering_mask[_si, 0] *= float(_scale_vals_fb[_si]) / _global_default
+                            self._steering_mask[_si, 0] *= (
+                                float(_scale_vals_fb[_si]) / _global_default
+                            )
 
         aux_hidden_states = []
         for i in range(normal_start_layer, normal_end_layer):
@@ -1318,9 +1339,17 @@ class Glm4MoeModel(nn.Module):
                 )
                 # POST-LAYER projective steering (prefill-only, v1 compatible).
                 # v3: loops over k directions per layer.
-                if _has_steering and _steered_layers is not None and i in _steered_layers:
+                if (
+                    _has_steering
+                    and _steered_layers is not None
+                    and i in _steered_layers
+                ):
                     _scale = self._steering_scales[i]
-                    _dirs_layer = self._steering_dirs[i] if hasattr(self, '_steering_dirs') else self._steering_dir.unsqueeze(0)
+                    _dirs_layer = (
+                        self._steering_dirs[i]
+                        if hasattr(self, "_steering_dirs")
+                        else self._steering_dir.unsqueeze(0)
+                    )
                     for _ki in range(_steering_k):
                         _dir = _dirs_layer[_ki]
                         _proj = (hidden_states * _dir).sum(dim=-1, keepdim=True)
@@ -1330,19 +1359,22 @@ class Glm4MoeModel(nn.Module):
                 # v3: multi-layer decode with per-layer scales + multi-vector k-loop.
                 if _has_decode_steering and residual is not None:
                     _should_decode_steer = (
-                        (_has_multi_layer_decode and i in _decode_steered_set) or
-                        (not _has_multi_layer_decode and i == _decode_peak_layer)
-                    )
+                        _has_multi_layer_decode and i in _decode_steered_set
+                    ) or (not _has_multi_layer_decode and i == _decode_peak_layer)
                     if _should_decode_steer:
                         _bs = hidden_states.shape[0]
                         _t1 = self._steer_dec_tmp1[:_bs]
                         _t2 = self._steer_dec_tmp2[:_bs]
-                        _p  = self._steer_dec_proj[:_bs]
+                        _p = self._steer_dec_proj[:_bs]
                         # Per-layer decode scale (v3: already includes decode_scale*weight)
                         # or global scale (v1/v2: single _steer_dec_scale value)
                         # Note: _steer_dec_scales already has decode_scale baked in;
                         # CUDA graph toggle zeros _steer_dec_scales directly.
-                        _dec_scale_i = self._steer_dec_scales[i] if _has_multi_layer_decode else self._steer_dec_scale
+                        _dec_scale_i = (
+                            self._steer_dec_scales[i]
+                            if _has_multi_layer_decode
+                            else self._steer_dec_scale
+                        )
                         torch.add(hidden_states, residual, out=_t1)
                         for _ki in range(_steering_k):
                             _dir_ki = self._steering_dirs[i][_ki]
@@ -1356,7 +1388,8 @@ class Glm4MoeModel(nn.Module):
                                 _mom = self._steer_momentum[:_bs]
                                 # 1. Per-request EMA: momentum[i] = decay*momentum[i] + (1-decay)*proj[i]
                                 _mom.mul_(self._v4_ema_decay).add_(
-                                    _p, alpha=self._v4_ema_complement)
+                                    _p, alpha=self._v4_ema_complement
+                                )
                                 # 2. Sigmoid input: (momentum - center) * steepness
                                 _stmp = self._v4_sig_tmp[:_bs]
                                 torch.sub(_mom, self._v4_sig_center, out=_stmp)
@@ -1376,11 +1409,19 @@ class Glm4MoeModel(nn.Module):
                             # Recompute h+residual for next direction (hidden_states changed)
                             if _ki < _steering_k - 1:
                                 torch.add(hidden_states, residual, out=_t1)
-                _maybe_capture(hidden_states, i, forward_batch, n_layers=len(self.layers), residual=residual)
+                _maybe_capture(
+                    hidden_states,
+                    i,
+                    forward_batch,
+                    n_layers=len(self.layers),
+                    residual=residual,
+                )
 
         # Restore per-request mask (eager mode)
         if _saved_steering_mask is not None:
-            self._steering_mask[:_saved_steering_mask.shape[0]].copy_(_saved_steering_mask)
+            self._steering_mask[: _saved_steering_mask.shape[0]].copy_(
+                _saved_steering_mask
+            )
 
         if normal_end_layer != self.end_layer:
             hidden_states, residual = model_forward_maybe_tbo(
@@ -1461,20 +1502,22 @@ class Glm4MoeForCausalLM(nn.Module):
         - Clamped projective decode steering with pre-allocated buffers
         """
         args = get_global_server_args()
-        if not getattr(args, 'steering_vector_path', None):
+        if not getattr(args, "steering_vector_path", None):
             return
 
         n_layers = self.config.num_hidden_layers
         hid = self.config.hidden_size
-        n_dirs = int(getattr(args, 'steering_n_directions', 1))
+        n_dirs = int(getattr(args, "steering_n_directions", 1))
 
         # --- Load steering vectors ---
         # DAS v3: per-layer vectors [n_layers, k, hidden_size] via --steering-per-layer-path
         # DAS v2: per-layer vectors [n_layers, hidden_size] (auto-upgraded to k=1)
         # DAS v1 fallback: single vector [hidden_size] via --steering-vector-path
-        per_layer_path = getattr(args, 'steering_per_layer_path', None)
+        per_layer_path = getattr(args, "steering_per_layer_path", None)
         if per_layer_path:
-            per_layer_vecs = torch.load(per_layer_path, map_location='cpu', weights_only=True)
+            per_layer_vecs = torch.load(
+                per_layer_path, map_location="cpu", weights_only=True
+            )
             # Backward compatibility: [n_layers, hidden_size] -> [n_layers, 1, hidden_size]
             if per_layer_vecs.dim() == 2:
                 if per_layer_vecs.shape[0] != n_layers:
@@ -1482,7 +1525,9 @@ class Glm4MoeForCausalLM(nn.Module):
                         f"Per-layer vectors must have {n_layers} layers, got {per_layer_vecs.shape[0]}"
                     )
                 per_layer_vecs = per_layer_vecs.unsqueeze(1)  # [n_layers, 1, hid]
-                logger.info(f"[steering] Upgraded 2D vectors to 3D: {per_layer_vecs.shape}")
+                logger.info(
+                    f"[steering] Upgraded 2D vectors to 3D: {per_layer_vecs.shape}"
+                )
             elif per_layer_vecs.dim() == 3:
                 if per_layer_vecs.shape[0] != n_layers:
                     raise ValueError(
@@ -1498,54 +1543,66 @@ class Glm4MoeForCausalLM(nn.Module):
             # Normalize each direction
             norms = per_layer_vecs.norm(dim=2, keepdim=True).clamp(min=1e-8)
             per_layer_vecs = per_layer_vecs / norms
-            logger.info(f"[steering] Loaded per-layer directions: {per_layer_vecs.shape} (k={k})")
+            logger.info(
+                f"[steering] Loaded per-layer directions: {per_layer_vecs.shape} (k={k})"
+            )
             self.model._steering_per_layer = True
         else:
             # v1 fallback: broadcast single vector to all layers, k=1
-            vec = torch.load(args.steering_vector_path, map_location='cpu', weights_only=True)
+            vec = torch.load(
+                args.steering_vector_path, map_location="cpu", weights_only=True
+            )
             if vec.dim() != 1:
                 raise ValueError(f"Steering vector must be 1-D, got shape {vec.shape}")
             vec = vec.float()
             vec = vec / vec.norm()
-            per_layer_vecs = vec.unsqueeze(0).unsqueeze(0).expand(n_layers, 1, -1).contiguous()
+            per_layer_vecs = (
+                vec.unsqueeze(0).unsqueeze(0).expand(n_layers, 1, -1).contiguous()
+            )
             k = 1
-            logger.info(f"[steering] Using single vector broadcast to all layers: {vec.shape}")
+            logger.info(
+                f"[steering] Using single vector broadcast to all layers: {vec.shape}"
+            )
             self.model._steering_per_layer = False
 
         # Store k for use in forward loops
         self.model._steering_k = k
 
         # Register per-layer direction matrix [n_layers, k, hidden_size] on Glm4MoeModel
-        self.model.register_buffer('_steering_dirs', per_layer_vecs.bfloat16())
+        self.model.register_buffer("_steering_dirs", per_layer_vecs.bfloat16())
 
         # Also keep a single global direction for v1 decode steering compatibility
-        steering_layers_str = getattr(args, 'steering_layers', None)
-        center_layers = _json.loads(steering_layers_str) if steering_layers_str else [47]
+        steering_layers_str = getattr(args, "steering_layers", None)
+        center_layers = (
+            _json.loads(steering_layers_str) if steering_layers_str else [47]
+        )
         peak_layer = int(center_layers[0]) if center_layers else 47
-        self.model.register_buffer('_steering_dir', per_layer_vecs[peak_layer, 0].clone().bfloat16())
+        self.model.register_buffer(
+            "_steering_dir", per_layer_vecs[peak_layer, 0].clone().bfloat16()
+        )
 
         # --- Compute layer weights (kernel) ---
-        mode = getattr(args, 'steering_mode', 'gaussian')
-        kernel = getattr(args, 'steering_kernel', mode)  # 'gaussian' or 'trapezoidal'
-        base_scale = float(getattr(args, 'steering_scale', 5.0))
-        sigma = float(getattr(args, 'steering_kernel_width', 2.0))
+        mode = getattr(args, "steering_mode", "gaussian")
+        kernel = getattr(args, "steering_kernel", mode)  # 'gaussian' or 'trapezoidal'
+        base_scale = float(getattr(args, "steering_scale", 5.0))
+        sigma = float(getattr(args, "steering_kernel_width", 2.0))
 
         # Attn and MLP scales: if not specified, both default to base_scale
-        attn_scale = float(getattr(args, 'steering_attn_scale', 0.0))
-        mlp_scale = float(getattr(args, 'steering_mlp_scale', 0.0))
+        attn_scale = float(getattr(args, "steering_attn_scale", 0.0))
+        mlp_scale = float(getattr(args, "steering_mlp_scale", 0.0))
 
         # v2 mode detection: if attn_scale or mlp_scale is set, use multi-point steering
-        self.model._steering_v2 = (attn_scale > 0.0 or mlp_scale > 0.0)
+        self.model._steering_v2 = attn_scale > 0.0 or mlp_scale > 0.0
 
         # Compute layer weight envelope (0-1 range, then scaled)
         layer_weights = torch.zeros(n_layers, dtype=torch.float32)
 
-        if kernel == 'trapezoidal':
+        if kernel == "trapezoidal":
             # Heretic-style trapezoidal: flat top around peak, linear ramp down
             # Default range: L30-L65 for 92-layer model
-            trap_start = int(getattr(args, 'steering_trap_start', 30))
-            trap_end = int(getattr(args, 'steering_trap_end', 65))
-            trap_ramp = int(getattr(args, 'steering_trap_ramp', 5))
+            trap_start = int(getattr(args, "steering_trap_start", 30))
+            trap_end = int(getattr(args, "steering_trap_end", 65))
+            trap_ramp = int(getattr(args, "steering_trap_ramp", 5))
             for i in range(n_layers):
                 if trap_start + trap_ramp <= i <= trap_end - trap_ramp:
                     layer_weights[i] = 1.0
@@ -1553,7 +1610,9 @@ class Glm4MoeForCausalLM(nn.Module):
                     layer_weights[i] = (i - trap_start) / max(trap_ramp, 1)
                 elif trap_end - trap_ramp < i <= trap_end:
                     layer_weights[i] = (trap_end - i) / max(trap_ramp, 1)
-            logger.info(f"[steering] Trapezoidal kernel: [{trap_start}, {trap_end}] ramp={trap_ramp}")
+            logger.info(
+                f"[steering] Trapezoidal kernel: [{trap_start}, {trap_end}] ramp={trap_ramp}"
+            )
         else:
             # Gaussian kernel (v1 compatible)
             for c in center_layers:
@@ -1561,7 +1620,9 @@ class Glm4MoeForCausalLM(nn.Module):
                     w = _math.exp(-0.5 * ((i - c) / sigma) ** 2)
                     if w > layer_weights[i].item():
                         layer_weights[i] = w
-            logger.info(f"[steering] Gaussian kernel: centers={center_layers}, sigma={sigma}")
+            logger.info(
+                f"[steering] Gaussian kernel: centers={center_layers}, sigma={sigma}"
+            )
 
         # Compute per-layer scales for each intervention point
         # v1 mode: base_scale applies to post-layer (hidden_states after MLP+residual)
@@ -1570,15 +1631,21 @@ class Glm4MoeForCausalLM(nn.Module):
         attn_scales = layer_weights * attn_scale  # post-attn scales (v2)
         mlp_scales = layer_weights * mlp_scale  # post-MoE scales (v2)
 
-        self.model.register_buffer('_steering_scales', scales.bfloat16())
-        self.model.register_buffer('_steering_attn_scales', attn_scales.bfloat16())
-        self.model.register_buffer('_steering_mlp_scales', mlp_scales.bfloat16())
+        self.model.register_buffer("_steering_scales", scales.bfloat16())
+        self.model.register_buffer("_steering_attn_scales", attn_scales.bfloat16())
+        self.model.register_buffer("_steering_mlp_scales", mlp_scales.bfloat16())
 
         # Pre-compute active layer sets for each intervention point
         # Only layers with non-zero scale generate GPU ops
-        _active_set = frozenset(int(i) for i in range(n_layers) if scales[i].item() > 1e-6)
-        _attn_active_set = frozenset(int(i) for i in range(n_layers) if attn_scales[i].item() > 1e-6)
-        _mlp_active_set = frozenset(int(i) for i in range(n_layers) if mlp_scales[i].item() > 1e-6)
+        _active_set = frozenset(
+            int(i) for i in range(n_layers) if scales[i].item() > 1e-6
+        )
+        _attn_active_set = frozenset(
+            int(i) for i in range(n_layers) if attn_scales[i].item() > 1e-6
+        )
+        _mlp_active_set = frozenset(
+            int(i) for i in range(n_layers) if mlp_scales[i].item() > 1e-6
+        )
         self.model._steered_layer_set = _active_set
         self.model._attn_steered_layer_set = _attn_active_set
         self.model._mlp_steered_layer_set = _mlp_active_set
@@ -1588,22 +1655,26 @@ class Glm4MoeForCausalLM(nn.Module):
 
         # --- Decode-time clamped projective steering ---
         # v3: multi-layer decode with kernel-weighted per-layer scales
-        decode_scale = float(getattr(args, 'steering_decode_scale', 0.0))
+        decode_scale = float(getattr(args, "steering_decode_scale", 0.0))
         self.model._decode_steer_peak_layer = peak_layer
         if decode_scale > 0.0:
-            max_bs = getattr(args, 'cuda_graph_max_bs', 80)
-            self.model.register_buffer('_steer_dec_tmp1',
-                torch.zeros(max_bs, hid, dtype=torch.bfloat16))
-            self.model.register_buffer('_steer_dec_tmp2',
-                torch.zeros(max_bs, hid, dtype=torch.bfloat16))
-            self.model.register_buffer('_steer_dec_proj',
-                torch.zeros(max_bs, 1, dtype=torch.bfloat16))
-            self.model.register_buffer('_steer_dec_scale',
-                torch.tensor(decode_scale, dtype=torch.bfloat16))
+            max_bs = getattr(args, "cuda_graph_max_bs", 80)
+            self.model.register_buffer(
+                "_steer_dec_tmp1", torch.zeros(max_bs, hid, dtype=torch.bfloat16)
+            )
+            self.model.register_buffer(
+                "_steer_dec_tmp2", torch.zeros(max_bs, hid, dtype=torch.bfloat16)
+            )
+            self.model.register_buffer(
+                "_steer_dec_proj", torch.zeros(max_bs, 1, dtype=torch.bfloat16)
+            )
+            self.model.register_buffer(
+                "_steer_dec_scale", torch.tensor(decode_scale, dtype=torch.bfloat16)
+            )
 
             # v3: compute per-layer decode scales (kernel-weighted)
             # Parse decode layers: explicit list or auto-derive from kernel
-            decode_layers_str = getattr(args, 'steering_decode_layers', None)
+            decode_layers_str = getattr(args, "steering_decode_layers", None)
             if decode_layers_str:
                 decode_layers = _json.loads(decode_layers_str)
             else:
@@ -1615,9 +1686,11 @@ class Glm4MoeForCausalLM(nn.Module):
             for dl in decode_layers:
                 if 0 <= dl < n_layers:
                     w = layer_weights[dl].item()
-                    decode_scales[dl] = decode_scale * max(w, 0.1)  # minimum 0.1 for selected layers
+                    decode_scales[dl] = decode_scale * max(
+                        w, 0.1
+                    )  # minimum 0.1 for selected layers
 
-            self.model.register_buffer('_steer_dec_scales', decode_scales.bfloat16())
+            self.model.register_buffer("_steer_dec_scales", decode_scales.bfloat16())
             _decode_steered_set = frozenset(
                 int(i) for i in range(n_layers) if decode_scales[i].item() > 1e-6
             )
@@ -1651,30 +1724,38 @@ class Glm4MoeForCausalLM(nn.Module):
         # CUDA-graph safe: all ops are in-place on pre-allocated buffers.
         # Momentum persists across decode steps (graph replays reuse same tensors).
         # Reset happens at prefill (eager mode) or via cuda_graph_runner on toggle.
-        self.model._v4_adaptive = (decode_scale > 0.0)
-        _v4_max_bs = getattr(args, 'cuda_graph_max_bs', 80)
+        self.model._v4_adaptive = decode_scale > 0.0
+        _v4_max_bs = getattr(args, "cuda_graph_max_bs", 80)
         if self.model._v4_adaptive:
             # Per-request momentum: each slot in the decode batch has its own EMA
-            self.model.register_buffer('_steer_momentum',
-                torch.zeros(_v4_max_bs, 1, dtype=torch.float32))
+            self.model.register_buffer(
+                "_steer_momentum", torch.zeros(_v4_max_bs, 1, dtype=torch.float32)
+            )
             # Per-request sigmoid intermediates
-            self.model.register_buffer('_v4_sig_tmp',
-                torch.zeros(_v4_max_bs, 1, dtype=torch.float32))
-            self.model.register_buffer('_v4_sig_result',
-                torch.zeros(_v4_max_bs, 1, dtype=torch.float32))
+            self.model.register_buffer(
+                "_v4_sig_tmp", torch.zeros(_v4_max_bs, 1, dtype=torch.float32)
+            )
+            self.model.register_buffer(
+                "_v4_sig_result", torch.zeros(_v4_max_bs, 1, dtype=torch.float32)
+            )
             # Per-request steering mask: 1.0=ON, 0.0=OFF (CUDA-graph safe)
-            self.model.register_buffer('_steering_mask',
-                torch.ones(_v4_max_bs, 1, dtype=torch.bfloat16))
+            self.model.register_buffer(
+                "_steering_mask", torch.ones(_v4_max_bs, 1, dtype=torch.bfloat16)
+            )
             # EMA config as registered buffers (move to GPU with model)
-            self.model.register_buffer('_v4_ema_decay',
-                torch.tensor(0.85, dtype=torch.float32))
+            self.model.register_buffer(
+                "_v4_ema_decay", torch.tensor(0.85, dtype=torch.float32)
+            )
             self.model._v4_ema_complement = 0.15  # Python float, compile-time constant
-            self.model.register_buffer('_v4_max_mult',
-                torch.tensor(2.5, dtype=torch.bfloat16))
-            self.model.register_buffer('_v4_sig_center',
-                torch.tensor(0.3, dtype=torch.float32))
-            self.model.register_buffer('_v4_sig_steep',
-                torch.tensor(4.0, dtype=torch.float32))
+            self.model.register_buffer(
+                "_v4_max_mult", torch.tensor(2.5, dtype=torch.bfloat16)
+            )
+            self.model.register_buffer(
+                "_v4_sig_center", torch.tensor(0.3, dtype=torch.float32)
+            )
+            self.model.register_buffer(
+                "_v4_sig_steep", torch.tensor(4.0, dtype=torch.float32)
+            )
             logger.info(
                 f"[steering] DAS v4 momentum-adaptive decode enabled "
                 f"(ema_decay=0.85, max_mult=2.5, per-request isolation, CUDA-graph safe)"
@@ -1898,21 +1979,39 @@ class Glm4MoeForCausalLM(nn.Module):
         # Must be here (not in forward()) so the CPU→GPU copy happens BEFORE
         # CUDA graph capture — otherwise the copy op gets embedded in the graph
         # and the source CPU tensor may be GC'd before graph replay.
-        if hasattr(self.model, '_steering_dir') and self.model._steering_dir is not None:
-            if self.model._steering_dir.device.type == 'cpu':
+        if (
+            hasattr(self.model, "_steering_dir")
+            and self.model._steering_dir is not None
+        ):
+            if self.model._steering_dir.device.type == "cpu":
                 try:
                     _dev = next(self.parameters()).device
                     # Core steering buffers (v1 + v2)
                     for _buf_name in (
-                        "_steering_dir", "_steering_dirs",
-                        "_steering_scales", "_steering_attn_scales", "_steering_mlp_scales",
-                        "_steer_dec_tmp1", "_steer_dec_tmp2",
-                        "_steer_dec_proj", "_steer_dec_scale",
+                        "_steering_dir",
+                        "_steering_dirs",
+                        "_steering_scales",
+                        "_steering_attn_scales",
+                        "_steering_mlp_scales",
+                        "_steer_dec_tmp1",
+                        "_steer_dec_tmp2",
+                        "_steer_dec_proj",
+                        "_steer_dec_scale",
                     ):
                         _buf = getattr(self.model, _buf_name, None)
-                        if _buf is not None and hasattr(_buf, 'device') and _buf.device.type == "cpu":
-                            setattr(self.model, _buf_name, _buf.to(device=_dev, dtype=torch.bfloat16))
-                    logger.info(f"[steering] load_weights: migrated all steering buffers to {_dev}")
+                        if (
+                            _buf is not None
+                            and hasattr(_buf, "device")
+                            and _buf.device.type == "cpu"
+                        ):
+                            setattr(
+                                self.model,
+                                _buf_name,
+                                _buf.to(device=_dev, dtype=torch.bfloat16),
+                            )
+                    logger.info(
+                        f"[steering] load_weights: migrated all steering buffers to {_dev}"
+                    )
                 except StopIteration:
                     pass  # no parameters yet, will migrate later
 

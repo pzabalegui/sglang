@@ -29,6 +29,7 @@ ScheduleBatch -> ModelWorkerBatch -> ForwardBatch
 
 from __future__ import annotations
 
+import logging as _logging
 from dataclasses import dataclass
 from enum import IntEnum, auto
 from functools import total_ordering
@@ -57,7 +58,7 @@ from sglang.srt.model_executor.forward_batch_deepseek_mha_mixin import (
 )
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import get_compiler_backend, is_hip, is_npu, support_triton
-import logging as _logging
+
 _steering_logger = _logging.getLogger("sglang.steering")
 from sglang.srt.utils.common import ceil_align
 
@@ -82,6 +83,7 @@ class SteeringConfig:
 
     Formula: h' = h - effective_scale * (h . r_hat) * r_hat
     """
+
     direction: torch.Tensor  # [hidden_size] global direction (v1 compatible)
     scale: float = 1.0
     layers: Optional[List[int]] = None
@@ -140,8 +142,7 @@ def apply_steering(
         return hidden_states
 
     direction = steering_config.direction.to(
-        device=hidden_states.device,
-        dtype=hidden_states.dtype
+        device=hidden_states.device, dtype=hidden_states.dtype
     )
     direction = direction / direction.norm()
 
@@ -162,29 +163,29 @@ def apply_steering_to_residual(
     layer_idx: int,
 ) -> torch.Tensor:
     """Apply steering to the residual stream BEFORE layer computation.
-    
+
     The residual holds the accumulated representation. By removing the
     refusal direction from the residual before prepare_attn, both the
     attention and MLP see cleaned inputs. This approximates orthogonalization.
-    
+
     Formula: res' = res - scale * (res . r_hat) * r_hat
     """
     if steering_config is None:
         return residual
     if not steering_config.should_apply_to_layer(layer_idx):
         return residual
-    
+
     direction = steering_config.direction.to(
         device=residual.device, dtype=residual.dtype
     )
     direction = direction / direction.norm()
-    
+
     # Project residual onto refusal direction
     proj_scalar = (residual * direction).sum(dim=-1, keepdim=True)
-    
+
     # CLAMPED: only steer tokens with positive projection (refusal-aligned)
     proj_scalar = proj_scalar.clamp(min=0)
-    
+
     # Remove the refusal component from residual
     effective_scale = steering_config.get_effective_scale(layer_idx)
     return residual - effective_scale * proj_scalar * direction
@@ -591,9 +592,15 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             override_scale = None
             if hasattr(batch, "reqs") and batch.reqs:
                 for req in batch.reqs:
-                    if hasattr(req, "steering_enabled") and req.steering_enabled is not None:
+                    if (
+                        hasattr(req, "steering_enabled")
+                        and req.steering_enabled is not None
+                    ):
                         override_enabled = req.steering_enabled
-                    if hasattr(req, "steering_scale") and req.steering_scale is not None:
+                    if (
+                        hasattr(req, "steering_scale")
+                        and req.steering_scale is not None
+                    ):
                         override_scale = req.steering_scale
 
             # Apply overrides if present
@@ -604,8 +611,12 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
                 # Recompute layer_weights if base has Gaussian kernel
                 if base_config.layer_weights is not None:
                     # Scale all layer weights proportionally
-                    scale_ratio = override_scale / max(base_config.layer_weights.values())
-                    new_weights = {l: w * scale_ratio for l, w in base_config.layer_weights.items()}
+                    scale_ratio = override_scale / max(
+                        base_config.layer_weights.values()
+                    )
+                    new_weights = {
+                        l: w * scale_ratio for l, w in base_config.layer_weights.items()
+                    }
                     ret.steering_config = SteeringConfig(
                         direction=base_config.direction,
                         scale=override_scale,
