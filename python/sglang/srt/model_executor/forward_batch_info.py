@@ -499,6 +499,8 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
     steering_disabled: bool = False
     # Per-request decode scale override (None = use server default)
     steering_decode_scale_override: float = None
+    # Per-request decode scale: list of per-request raw scale values (None = default)
+    steering_decode_scale_values: object = None
     # Per-request steering mask: list of 1.0/0.0 per request in batch (None = all ON)
     steering_mask_values: object = None
 
@@ -566,10 +568,14 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
                 else:
                     _mask_vals.append(1.0)
                     _all_off = False
-                # Per-request decode scale override (first non-None wins)
+                # Per-request decode scale override
                 _ds = getattr(req, "steering_decode_scale", None)
-                if _ds is not None and ret.steering_decode_scale_override is None:
-                    ret.steering_decode_scale_override = float(_ds)
+                if _ds is not None:
+                    if ret.steering_decode_scale_override is None:
+                        ret.steering_decode_scale_override = float(_ds)
+                    if ret.steering_decode_scale_values is None:
+                        ret.steering_decode_scale_values = [None] * len(batch.reqs)
+                    ret.steering_decode_scale_values[len(_mask_vals) - 1] = float(_ds)
             # Full disable only when ALL requests have steering off
             ret.steering_disabled = _all_off
             # Per-request mask (None if all ON for backward compat)

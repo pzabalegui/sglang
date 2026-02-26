@@ -1068,23 +1068,28 @@ class CudaGraphRunner:
         _ds_override = getattr(forward_batch, 'steering_decode_scale_override', None)
         _mask_vals = getattr(forward_batch, 'steering_mask_values', None)
 
-        # Set per-request steering mask on model buffer
+        # Set per-request steering mask on model buffer (always save for restore)
         if hasattr(_inner, '_steering_mask') and _inner._steering_mask is not None:
             import torch as _torch
+            _steer_restore['mask'] = _inner._steering_mask[:self.bs].clone()
             if _steering_off:
-                # All OFF: zero entire mask
-                _steer_restore['mask'] = _inner._steering_mask[:self.bs].clone()
                 _inner._steering_mask[:self.bs].zero_()
             elif _mask_vals is not None:
-                # Mixed ON/OFF: set per-request
-                _steer_restore['mask'] = _inner._steering_mask[:self.bs].clone()
                 _bs_actual = min(len(_mask_vals), self.bs)
                 _inner._steering_mask[:_bs_actual, 0] = _torch.tensor(
                     _mask_vals[:_bs_actual], dtype=_inner._steering_mask.dtype,
                     device=_inner._steering_mask.device)
             else:
-                # All ON: ensure mask is 1.0
                 _inner._steering_mask[:self.bs].fill_(1.0)
+            # Fold per-request decode scale overrides into mask
+            _scale_vals = getattr(forward_batch, 'steering_decode_scale_values', None)
+            if _scale_vals is not None and hasattr(_inner, '_steer_dec_scale') and _inner._steer_dec_scale is not None:
+                _global_default = _inner._steer_dec_scale.item()
+                if _global_default > 0:
+                    _bs_actual = min(len(_scale_vals), self.bs)
+                    for _si in range(_bs_actual):
+                        if _scale_vals[_si] is not None:
+                            _inner._steering_mask[_si, 0] *= float(_scale_vals[_si]) / _global_default
 
         if _steering_off:
             # Zero all steering scales (full disable — optimization, mask already handles it)
@@ -1116,16 +1121,7 @@ class CudaGraphRunner:
                 for _mi in range(_bs_actual):
                     if _mask_vals[_mi] < 0.5:
                         _inner._steer_momentum[_mi].zero_()
-        elif _ds_override is not None:
-            # Per-request decode scale override (not full disable)
-            if hasattr(_inner, '_steer_dec_scale') and _inner._steer_dec_scale is not None:
-                _steer_restore['dec_scale'] = _inner._steer_dec_scale.item()
-                _old_global = _steer_restore['dec_scale']
-                _inner._steer_dec_scale.fill_(float(_ds_override))
-                if hasattr(_inner, '_steer_dec_scales') and _inner._steer_dec_scales is not None and _old_global > 0:
-                    _steer_restore['dec_scales'] = _inner._steer_dec_scales.clone()
-                    _ratio = float(_ds_override) / _old_global
-                    _inner._steer_dec_scales.mul_(_ratio)
+
 
         self.graphs[graph_key].replay()
 

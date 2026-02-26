@@ -205,12 +205,12 @@ _V4_DEFAULT_CONFIG = {
 
 
 class _DecodeSteeringHook:
-    """Per-layer decode steering hook with momentum-adaptive scale.
+    """Per-layer decode steering hook with per-request momentum-adaptive scale.
 
     Registered via register_forward_hook on each Glm4MoeDecoderLayer.
-    Only fires during decode mode. Uses EMA momentum tracking to
-    adaptively scale steering: high momentum (model keeps projecting onto
-    refusal) → increased steering scale via sigmoid mapping.
+    Only fires during decode mode. Uses per-request EMA momentum tracking
+    to adaptively scale steering via sigmoid mapping.
+    Per-request isolation: each request in the batch has independent momentum.
     """
 
     def __init__(self, layer_idx, directions, layer_weight, config, device):
@@ -221,79 +221,103 @@ class _DecodeSteeringHook:
         self.directions = directions.to(device=device, dtype=torch.bfloat16)
         norms = self.directions.norm(dim=1, keepdim=True).clamp(min=1e-8)
         self.directions = self.directions / norms
-        self.momentum = torch.zeros(1, device=device, dtype=torch.float32)
+        # Per-request momentum: lazily allocated [capacity, 1]
+        self.momentum = None
+        self._mom_capacity = 0
         self.step_count = 0
         self.total_projections = 0
         self.total_steered = 0
 
     def reset_momentum(self):
-        self.momentum.zero_()
+        if self.momentum is not None:
+            self.momentum.zero_()
         self.step_count = 0
 
-    def __call__(self, module, input, output):
-        """Post-forward hook on Glm4MoeDecoderLayer.
+    def _ensure_momentum(self, bs, device):
+        """Ensure momentum buffer can hold at least bs requests."""
+        if self.momentum is None or bs > self._mom_capacity:
+            new_cap = max(bs, self._mom_capacity * 2, 16)
+            self.momentum = torch.zeros(new_cap, 1, device=device, dtype=torch.float32)
+            self._mom_capacity = new_cap
 
-        Args:
-            module: the decoder layer
-            input: (positions, hidden_states, forward_batch, residual, ...)
-            output: (hidden_states, residual)
-        """
+    def __call__(self, module, input, output):
+        """Post-forward hook on Glm4MoeDecoderLayer."""
         if not isinstance(output, tuple) or len(output) != 2:
             return output
 
         hidden_states, residual = output
 
-        # Only steer during decode
         forward_batch = input[2]
         if not forward_batch.forward_mode.is_decode():
             self.reset_momentum()
             return output
 
-        # Per-request steering toggle
+        # Skip only if ALL requests have steering off
         if getattr(forward_batch, 'steering_disabled', False):
             return output
 
-        if residual is None:
+        if residual is None or self.layer_weight < 1e-6:
             return output
 
-        if self.layer_weight < 1e-6:
-            return output
-
-        # Lazy device transfer: directions are created on CPU during _init_steering()
-        # and need to move to the correct GPU on first use.
+        # Lazy device transfer
         if self.directions.device != hidden_states.device:
             self.directions = self.directions.to(device=hidden_states.device)
-            self.momentum = self.momentum.to(device=hidden_states.device)
+
+        bs = hidden_states.shape[0]
+        cfg = self.config
+        self._ensure_momentum(bs, hidden_states.device)
+        mom = self.momentum[:bs]  # [bs, 1]
+
+        # Build per-request mask [bs, 1] from forward_batch
+        _mask_vals = getattr(forward_batch, 'steering_mask_values', None)
+        if _mask_vals is not None:
+            mask = torch.tensor(
+                _mask_vals[:bs], device=hidden_states.device,
+                dtype=hidden_states.dtype).unsqueeze(1)
+        else:
+            mask = None
+
+        # Fold per-request decode scale overrides into mask
+        _scale_vals = getattr(forward_batch, 'steering_decode_scale_values', None)
+        if _scale_vals is not None:
+            _base = cfg.get("base_scale", 1.0)
+            if _base > 0:
+                _ratios = [
+                    float(_scale_vals[i]) / _base
+                    if i < len(_scale_vals) and _scale_vals[i] is not None
+                    else 1.0
+                    for i in range(bs)
+                ]
+                if any(abs(r - 1.0) > 1e-6 for r in _ratios):
+                    _rt = torch.tensor(
+                        _ratios, device=hidden_states.device,
+                        dtype=hidden_states.dtype).unsqueeze(1)
+                    mask = _rt if mask is None else mask * _rt
 
         h_plus_r = hidden_states + residual
-        cfg = self.config
         self.step_count += 1
 
         for ki in range(self.k):
             d = self.directions[ki]
-            proj = (h_plus_r * d).sum(dim=-1, keepdim=True)
-            proj_clamped = proj.clamp(min=0)
-            proj_mag = proj_clamped.mean().item()
-            self.total_projections += 1
+            proj = (h_plus_r * d).sum(dim=-1, keepdim=True)  # [bs, 1]
+            proj_clamped = proj.clamp(min=0)  # [bs, 1]
+            self.total_projections += bs
 
-            if proj_mag < cfg["proj_threshold"]:
-                continue
+            # Per-request EMA momentum update (no batch averaging)
+            mom.mul_(cfg["ema_decay"]).add_(proj_clamped, alpha=(1 - cfg["ema_decay"]))
 
-            self.momentum.mul_(cfg["ema_decay"]).add_(
-                proj_mag * (1 - cfg["ema_decay"])
-            )
-
-            m = self.momentum.item()
-            sig_input = (m - cfg["sigmoid_center"]) * cfg["sigmoid_steepness"]
-            sig = 1.0 / (1.0 + _math.exp(-sig_input))
-
+            # Per-request sigmoid adaptive scale (pure tensor ops)
+            sig = torch.sigmoid(
+                (mom - cfg["sigmoid_center"]) * cfg["sigmoid_steepness"])
             adaptive_scale = (
                 cfg["base_scale"] * self.layer_weight * sig * cfg["max_scale_mult"]
-            )
+            )  # [bs, 1]
 
-            correction = adaptive_scale * proj_clamped * d
+            correction = adaptive_scale * proj_clamped * d  # [bs, hidden]
+            if mask is not None:
+                correction = correction * mask
             hidden_states = hidden_states - correction
-            self.total_steered += 1
+            self.total_steered += bs
 
             if ki < self.k - 1:
                 h_plus_r = hidden_states + residual
@@ -1257,24 +1281,27 @@ class Glm4MoeModel(nn.Module):
         if _is_prefill and _v4_adaptive and hasattr(self, '_steer_momentum'):
             self._steer_momentum.zero_()
 
-        # Per-request decode scale override (CUDA-graph safe: modifies buffer before layer loop)
-        _saved_dec_scale_for_override = None
-        _saved_dec_scales_for_override = None
-        _ds_override = getattr(forward_batch, 'steering_decode_scale_override', None)
-        if _has_decode_steering and _ds_override is not None:
-            if _has_multi_layer_decode:
-                # Scale proportionally: new_scale[i] = old_scale[i] * (override / global_default)
-                # Since _steer_dec_scales has global_scale baked in, rescale all layers
-                _old_global = self._steer_dec_scale.item()
-                if _old_global > 0:
-                    _ratio = float(_ds_override) / _old_global
-                    _saved_dec_scales_for_override = self._steer_dec_scales.clone()
-                    self._steer_dec_scales.mul_(_ratio)
-                _saved_dec_scale_for_override = _old_global
-                self._steer_dec_scale.fill_(float(_ds_override))
+        # Per-request mask + decode scale override (eager mode: set mask from forward_batch)
+        _saved_steering_mask = None
+        if _has_decode_steering and hasattr(self, '_steering_mask') and self._steering_mask is not None:
+            _bs_fb = forward_batch.batch_size
+            _mask_vals_fb = getattr(forward_batch, 'steering_mask_values', None)
+            _scale_vals_fb = getattr(forward_batch, 'steering_decode_scale_values', None)
+            _saved_steering_mask = self._steering_mask[:_bs_fb].clone()
+            if _mask_vals_fb is not None:
+                _bs_actual = min(len(_mask_vals_fb), _bs_fb)
+                self._steering_mask[:_bs_actual, 0] = torch.tensor(
+                    _mask_vals_fb[:_bs_actual], dtype=self._steering_mask.dtype,
+                    device=self._steering_mask.device)
             else:
-                _saved_dec_scale_for_override = self._steer_dec_scale.item()
-                self._steer_dec_scale.fill_(float(_ds_override))
+                self._steering_mask[:_bs_fb].fill_(1.0)
+            # Fold per-request decode scale overrides into mask
+            if _scale_vals_fb is not None and self._steer_dec_scale is not None:
+                _global_default = self._steer_dec_scale.item()
+                if _global_default > 0:
+                    for _si in range(min(len(_scale_vals_fb), _bs_fb)):
+                        if _scale_vals_fb[_si] is not None:
+                            self._steering_mask[_si, 0] *= float(_scale_vals_fb[_si]) / _global_default
 
         aux_hidden_states = []
         for i in range(normal_start_layer, normal_end_layer):
@@ -1351,11 +1378,9 @@ class Glm4MoeModel(nn.Module):
                                 torch.add(hidden_states, residual, out=_t1)
                 _maybe_capture(hidden_states, i, forward_batch, n_layers=len(self.layers), residual=residual)
 
-        # Restore decode scale after per-request override
-        if _saved_dec_scale_for_override is not None:
-            self._steer_dec_scale.fill_(_saved_dec_scale_for_override)
-        if _saved_dec_scales_for_override is not None:
-            self._steer_dec_scales.copy_(_saved_dec_scales_for_override)
+        # Restore per-request mask (eager mode)
+        if _saved_steering_mask is not None:
+            self._steering_mask[:_saved_steering_mask.shape[0]].copy_(_saved_steering_mask)
 
         if normal_end_layer != self.end_layer:
             hidden_states, residual = model_forward_maybe_tbo(
