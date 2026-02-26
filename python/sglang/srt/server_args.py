@@ -588,6 +588,22 @@ class ServerArgs:
     enable_mscclpp: bool = False
     enable_torch_symm_mem: bool = False
     disable_overlap_schedule: bool = False
+    # === DAS Steering (v1 + v2 + v3) ===
+    steering_vector_path: Optional[str] = None
+    steering_per_layer_path: Optional[str] = None
+    steering_scale: float = 5.0
+    steering_attn_scale: float = 0.0
+    steering_mlp_scale: float = 0.0
+    steering_decode_scale: float = 0.0
+    steering_n_directions: int = 1
+    steering_decode_layers: Optional[str] = None  # JSON list, e.g. '[35,40,47,55,60]'
+    steering_layers: Optional[str] = None  # JSON list, e.g. '[47]'
+    steering_mode: str = "gaussian"
+    steering_kernel: str = "gaussian"  # 'gaussian' or 'trapezoidal'
+    steering_kernel_width: float = 2.0
+    steering_trap_start: int = 30
+    steering_trap_end: int = 65
+    steering_trap_ramp: int = 5
     enable_mixed_chunk: bool = False
     enable_dp_attention: bool = False
     enable_dp_lm_head: bool = False
@@ -1023,7 +1039,42 @@ class ServerArgs:
             reserved_mem += self.tp_size * self.pp_size / 8 * 1024
 
             if self.enable_dp_attention:
-                # DP attention needs more padding for some operations
+        
+        # === DAS Steering CLI args (v1 + v2 + v3) ===
+        parser.add_argument("--steering-vector-path", type=str, default=None,
+            help="Path to refusal direction vector (.pt file, shape [hidden_size])")
+        parser.add_argument("--steering-per-layer-path", type=str, default=None,
+            help="Path to per-layer refusal directions (.pt, shape [n_layers, (k,) hidden_size])")
+        parser.add_argument("--steering-scale", type=float, default=5.0,
+            help="Post-layer steering scale (v1 compatible)")
+        parser.add_argument("--steering-attn-scale", type=float, default=0.0,
+            help="DAS v2: post-attention steering scale (0 = disabled)")
+        parser.add_argument("--steering-mlp-scale", type=float, default=0.0,
+            help="DAS v2: post-MoE steering scale (0 = disabled)")
+        parser.add_argument("--steering-decode-scale", type=float, default=0.0,
+            help="Clamped projective decode steering scale (0 = disabled)")
+        parser.add_argument("--steering-n-directions", type=int, default=1,
+            help="DAS v3: number of SVD directions per layer (1=v2 compat)")
+        parser.add_argument("--steering-decode-layers", type=str, default=None,
+            help="DAS v3: JSON list of decode steering layers, e.g. '[35,40,47,55,60]'")
+        parser.add_argument("--steering-layers", type=str, default=None,
+            help="JSON list of center layers, e.g. '[47]'")
+        parser.add_argument("--steering-mode", type=str, default="gaussian",
+            choices=["gaussian", "single"],
+            help="Steering mode: gaussian kernel or single layer")
+        parser.add_argument("--steering-kernel", type=str, default="gaussian",
+            choices=["gaussian", "trapezoidal"],
+            help="DAS v2: layer weight kernel type")
+        parser.add_argument("--steering-kernel-width", type=float, default=2.0,
+            help="Gaussian kernel sigma (width)")
+        parser.add_argument("--steering-trap-start", type=int, default=30,
+            help="DAS v2: trapezoidal kernel start layer")
+        parser.add_argument("--steering-trap-end", type=int, default=65,
+            help="DAS v2: trapezoidal kernel end layer")
+        parser.add_argument("--steering-trap-ramp", type=int, default=5,
+            help="DAS v2: trapezoidal kernel ramp width")
+
+        # DP attention needs more padding for some operations
                 reserved_mem += self.cuda_graph_max_bs * self.dp_size * 3
 
                 # DP attention uses much more memory for large cuda graph max bs,

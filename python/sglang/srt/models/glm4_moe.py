@@ -78,6 +78,88 @@ from sglang.srt.layers.vocab_parallel_embedding import (
 )
 from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
+import math as _math
+
+# ============================================================
+# ACTIVATION CAPTURE for refusal direction extraction
+# ============================================================
+import json as _json
+import os as _os
+
+_CAPTURE_STORE = {}
+_CAPTURE_COUNTER = [0]
+_CAPTURE_CONFIG_CACHE = [None, 0]  # [config, last_check_time]
+
+def _get_capture_config():
+    """Read capture config with 1-second cache."""
+    import time
+    now = time.time()
+    if now - _CAPTURE_CONFIG_CACHE[1] < 1.0 and _CAPTURE_CONFIG_CACHE[0] is not None:
+        return _CAPTURE_CONFIG_CACHE[0]
+    _CAPTURE_CONFIG_CACHE[1] = now
+
+    config_path = "/tmp/capture_config.json"
+    if not _os.path.exists(config_path):
+        _CAPTURE_CONFIG_CACHE[0] = None
+        return None
+    try:
+        with open(config_path, "r") as f:
+            cfg = _json.load(f)
+        if not cfg.get("enabled", False):
+            _CAPTURE_CONFIG_CACHE[0] = None
+            return None
+        _CAPTURE_CONFIG_CACHE[0] = cfg
+        return cfg
+    except Exception:
+        _CAPTURE_CONFIG_CACHE[0] = None
+        return None
+
+
+def _maybe_capture(hidden_states, layer_idx, forward_batch, n_layers=92, residual=None):
+    """Capture hidden states during prefill for refusal direction extraction.
+    
+    Captures full representation (hidden_states + residual) for last token only,
+    to match what HuggingFace output_hidden_states provides.
+    """
+    import torch
+
+    cfg = _get_capture_config()
+    if cfg is None:
+        return
+
+    # Only capture during prefill (not decode)
+    if hidden_states.shape[0] <= 2:
+        return
+
+    # Only capture on rank 0 (all ranks have identical hidden_states after allreduce)
+    try:
+        import torch.distributed as dist
+        if dist.is_initialized() and dist.get_rank() != 0:
+            return
+    except Exception:
+        pass
+
+    target_layers = cfg.get("layers", list(range(n_layers)))
+    if layer_idx not in target_layers:
+        return
+
+    # Save last token's hidden state (where refusal signal is strongest)
+    # Compute full representation (h + residual) only for last token (memory efficient)
+    last_h = hidden_states[-1, :]
+    if residual is not None:
+        last_h = last_h + residual[-1, :]
+    _CAPTURE_STORE[layer_idx] = last_h.detach().cpu().to(torch.float32)
+
+    # When we reach the last target layer, save everything to disk
+    max_target = max(target_layers)
+    if layer_idx == max_target:
+        save_dir = cfg.get("save_dir", "/tmp/captures")
+        _os.makedirs(save_dir, exist_ok=True)
+        sample_id = _CAPTURE_COUNTER[0]
+        save_path = _os.path.join(save_dir, f"sample_{sample_id}.pt")
+        torch.save(dict(_CAPTURE_STORE), save_path)
+        _CAPTURE_STORE.clear()
+        _CAPTURE_COUNTER[0] += 1
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.deepseek_v2 import DeepseekV2ForCausalLM
 from sglang.srt.models.utils import apply_qk_norm
@@ -104,6 +186,119 @@ _is_cpu = is_cpu()
 _device_sm = get_device_sm()
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# DAS v4: Adaptive decode steering via PyTorch forward hooks
+# Requires --disable-cuda-graph (hooks don't fire during CUDA graph replay).
+# When active, inline decode steering is disabled to avoid double-steering.
+# ============================================================
+
+_V4_DEFAULT_CONFIG = {
+    "base_scale": 2.0,
+    "max_scale_mult": 2.5,
+    "ema_decay": 0.85,
+    "sigmoid_steepness": 4.0,
+    "sigmoid_center": 0.3,
+    "proj_threshold": 0.01,
+}
+
+
+class _DecodeSteeringHook:
+    """Per-layer decode steering hook with momentum-adaptive scale.
+
+    Registered via register_forward_hook on each Glm4MoeDecoderLayer.
+    Only fires during decode mode. Uses EMA momentum tracking to
+    adaptively scale steering: high momentum (model keeps projecting onto
+    refusal) → increased steering scale via sigmoid mapping.
+    """
+
+    def __init__(self, layer_idx, directions, layer_weight, config, device):
+        self.layer_idx = layer_idx
+        self.config = config
+        self.layer_weight = layer_weight
+        self.k = directions.shape[0]
+        self.directions = directions.to(device=device, dtype=torch.bfloat16)
+        norms = self.directions.norm(dim=1, keepdim=True).clamp(min=1e-8)
+        self.directions = self.directions / norms
+        self.momentum = torch.zeros(1, device=device, dtype=torch.float32)
+        self.step_count = 0
+        self.total_projections = 0
+        self.total_steered = 0
+
+    def reset_momentum(self):
+        self.momentum.zero_()
+        self.step_count = 0
+
+    def __call__(self, module, input, output):
+        """Post-forward hook on Glm4MoeDecoderLayer.
+
+        Args:
+            module: the decoder layer
+            input: (positions, hidden_states, forward_batch, residual, ...)
+            output: (hidden_states, residual)
+        """
+        if not isinstance(output, tuple) or len(output) != 2:
+            return output
+
+        hidden_states, residual = output
+
+        # Only steer during decode
+        forward_batch = input[2]
+        if not forward_batch.forward_mode.is_decode():
+            self.reset_momentum()
+            return output
+
+        # Per-request steering toggle
+        if getattr(forward_batch, 'steering_disabled', False):
+            return output
+
+        if residual is None:
+            return output
+
+        if self.layer_weight < 1e-6:
+            return output
+
+        # Lazy device transfer: directions are created on CPU during _init_steering()
+        # and need to move to the correct GPU on first use.
+        if self.directions.device != hidden_states.device:
+            self.directions = self.directions.to(device=hidden_states.device)
+            self.momentum = self.momentum.to(device=hidden_states.device)
+
+        h_plus_r = hidden_states + residual
+        cfg = self.config
+        self.step_count += 1
+
+        for ki in range(self.k):
+            d = self.directions[ki]
+            proj = (h_plus_r * d).sum(dim=-1, keepdim=True)
+            proj_clamped = proj.clamp(min=0)
+            proj_mag = proj_clamped.mean().item()
+            self.total_projections += 1
+
+            if proj_mag < cfg["proj_threshold"]:
+                continue
+
+            self.momentum.mul_(cfg["ema_decay"]).add_(
+                proj_mag * (1 - cfg["ema_decay"])
+            )
+
+            m = self.momentum.item()
+            sig_input = (m - cfg["sigmoid_center"]) * cfg["sigmoid_steepness"]
+            sig = 1.0 / (1.0 + _math.exp(-sig_input))
+
+            adaptive_scale = (
+                cfg["base_scale"] * self.layer_weight * sig * cfg["max_scale_mult"]
+            )
+
+            correction = adaptive_scale * proj_clamped * d
+            hidden_states = hidden_states - correction
+            self.total_steered += 1
+
+            if ki < self.k - 1:
+                h_plus_r = hidden_states + residual
+
+        return (hidden_states, residual)
 
 
 class Glm4MoeMLP(nn.Module):
@@ -773,6 +968,7 @@ class Glm4MoeDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
         residual: Optional[torch.Tensor],
+        steering_ctx: Optional[Dict] = None,
     ) -> torch.Tensor:
 
         hidden_states, residual = self.layer_communicator.prepare_attn(
@@ -785,15 +981,50 @@ class Glm4MoeDecoderLayer(nn.Module):
             forward_batch=forward_batch,
         )
 
+        # DAS v2: post-attention steering (after o_proj, before prepare_mlp)
+        # Projects refusal direction out of attention output.
+        # Note: hidden_states here is the raw attention output (before allreduce in some configs).
+        # We only do this during prefill when TP allreduce has happened (reduce_results=False
+        # on o_proj means the TP reduction happens in prepare_mlp, so we steer before that).
+        # CORRECTION: o_proj has reduce_results=False, so hidden_states is partial TP shard.
+        # We steer AFTER prepare_mlp which does the allreduce. See below.
+        # Actually the attn steering happens right after prepare_mlp gives us the full tensor.
+
         hidden_states, residual = self.layer_communicator.prepare_mlp(
             hidden_states, residual, forward_batch
         )
+
+        # DAS v2/v3: post-attention steering (after allreduce, before MLP)
+        # At this point hidden_states is the fully-reduced attention output after layernorm.
+        # This is the correct point to project out refusal from attention contribution.
+        # v3: loops over k directions per layer (k=1 for v2 backward compat).
+        if steering_ctx is not None and steering_ctx.get('attn_active'):
+            _layer_id = self.layer_id
+            if _layer_id in steering_ctx['attn_set']:
+                _dirs_k = steering_ctx['dirs'][_layer_id]  # [k, hidden_size]
+                _s = steering_ctx['attn_scales'][_layer_id]
+                _k = steering_ctx['k']
+                for _ki in range(_k):
+                    _dir = _dirs_k[_ki]
+                    _proj = (hidden_states * _dir).sum(dim=-1, keepdim=True)
+                    _proj.clamp_(min=0)  # only subtract when aligned with refusal
+                    hidden_states = hidden_states - _s * _proj * _dir
 
         should_allreduce_fusion = (
             self.layer_communicator.should_fuse_mlp_allreduce_with_next_layer(
                 forward_batch
             )
         )
+
+        # Disable allreduce fusion when steering is active - steering requires
+        # fully all-reduced hidden_states to compute correct projections
+        if should_allreduce_fusion and forward_batch.steering_config is not None:
+            if forward_batch.steering_config.enabled:
+                should_allreduce_fusion = False
+        # Also disable for DAS v2 MLP steering
+        if should_allreduce_fusion and steering_ctx is not None:
+            if steering_ctx.get('mlp_active') and self.layer_id in steering_ctx.get('mlp_set', set()):
+                should_allreduce_fusion = False
 
         # For DP with padding, reduce scatter can be used instead of all-reduce.
         use_reduce_scatter = self.layer_communicator.should_use_reduce_scatter(
@@ -803,6 +1034,21 @@ class Glm4MoeDecoderLayer(nn.Module):
         hidden_states = self.mlp(
             hidden_states, forward_batch, should_allreduce_fusion, use_reduce_scatter
         )
+
+        # DAS v2/v3: post-MoE steering (after MLP/MoE output, before residual add)
+        # This targets the MLP contribution to refusal specifically.
+        # v3: loops over k directions per layer.
+        if steering_ctx is not None and steering_ctx.get('mlp_active'):
+            _layer_id = self.layer_id
+            if _layer_id in steering_ctx['mlp_set']:
+                _dirs_k = steering_ctx['dirs'][_layer_id]  # [k, hidden_size]
+                _s = steering_ctx['mlp_scales'][_layer_id]
+                _k = steering_ctx['k']
+                for _ki in range(_k):
+                    _dir = _dirs_k[_ki]
+                    _proj = (hidden_states * _dir).sum(dim=-1, keepdim=True)
+                    _proj.clamp_(min=0)  # only subtract when aligned with refusal
+                    hidden_states = hidden_states - _s * _proj * _dir
 
         if should_allreduce_fusion:
             hidden_states._sglang_needs_allreduce_fusion = True
@@ -956,6 +1202,80 @@ class Glm4MoeModel(nn.Module):
             elif self.first_k_dense_replace < normal_start_layer:
                 normal_end_layer = normal_start_layer = 0
 
+        # --- DAS v1/v2 steering setup ---
+        # Prefill: always eager → steering is safe (out-of-place ops).
+        # Decode: only clamped projective with pre-allocated buffers (CUDA-graph safe).
+        _is_prefill = not forward_batch.forward_mode.is_decode()
+
+        # Per-request steering toggle
+        _steering_off = getattr(forward_batch, 'steering_disabled', False)
+
+        # DAS v2/v3: multi-point steering context (attn + MLP intervention)
+        _steering_v2 = getattr(self, '_steering_v2', False) and _is_prefill and not _steering_off
+        _steering_k = getattr(self, '_steering_k', 1)
+
+        # Post-layer steering (v1 compatible): projects refusal from hidden_states
+        # When v2 is active, post-layer steering is skipped to avoid double-steering
+        # (v2 already steers at attn + MLP points within the layer).
+        _has_steering = (
+            hasattr(self, '_steering_dir')
+            and self._steering_dir is not None
+            and _is_prefill
+            and not _steering_v2
+            and not _steering_off
+        )
+        _steered_layers = getattr(self, '_steered_layer_set', None)
+        _steering_ctx = None
+        if _steering_v2:
+            _attn_set = getattr(self, '_attn_steered_layer_set', frozenset())
+            _mlp_set = getattr(self, '_mlp_steered_layer_set', frozenset())
+            _steering_ctx = {
+                'dirs': self._steering_dirs,           # [n_layers, k, hidden_size]
+                'attn_scales': self._steering_attn_scales,  # [n_layers]
+                'mlp_scales': self._steering_mlp_scales,    # [n_layers]
+                'attn_set': _attn_set,
+                'mlp_set': _mlp_set,
+                'attn_active': len(_attn_set) > 0,
+                'mlp_active': len(_mlp_set) > 0,
+                'k': _steering_k,
+            }
+
+        # Clamped projective decode steering: pre-allocated buffers -> CUDA-graph safe.
+        # v3: multi-layer decode with per-layer scales
+        # v4: momentum-adaptive scaling in eager mode (--disable-cuda-graph)
+        _has_decode_steering = (
+            forward_batch.forward_mode.is_decode()
+            and getattr(self, '_steer_dec_scale', None) is not None
+            and not _steering_off
+        )
+        _decode_peak_layer = getattr(self, '_decode_steer_peak_layer', -1)
+        _decode_steered_set = getattr(self, '_decode_steered_set', frozenset())
+        _has_multi_layer_decode = getattr(self, '_has_multi_layer_decode', False)
+        _v4_adaptive = getattr(self, '_v4_adaptive', False)
+
+        # v4: Reset momentum at prefill (new sequence start)
+        if _is_prefill and _v4_adaptive and hasattr(self, '_steer_momentum'):
+            self._steer_momentum.zero_()
+
+        # Per-request decode scale override (CUDA-graph safe: modifies buffer before layer loop)
+        _saved_dec_scale_for_override = None
+        _saved_dec_scales_for_override = None
+        _ds_override = getattr(forward_batch, 'steering_decode_scale_override', None)
+        if _has_decode_steering and _ds_override is not None:
+            if _has_multi_layer_decode:
+                # Scale proportionally: new_scale[i] = old_scale[i] * (override / global_default)
+                # Since _steer_dec_scales has global_scale baked in, rescale all layers
+                _old_global = self._steer_dec_scale.item()
+                if _old_global > 0:
+                    _ratio = float(_ds_override) / _old_global
+                    _saved_dec_scales_for_override = self._steer_dec_scales.clone()
+                    self._steer_dec_scales.mul_(_ratio)
+                _saved_dec_scale_for_override = _old_global
+                self._steer_dec_scale.fill_(float(_ds_override))
+            else:
+                _saved_dec_scale_for_override = self._steer_dec_scale.item()
+                self._steer_dec_scale.fill_(float(_ds_override))
+
         aux_hidden_states = []
         for i in range(normal_start_layer, normal_end_layer):
             with get_global_expert_distribution_recorder().with_current_layer(i):
@@ -967,7 +1287,73 @@ class Glm4MoeModel(nn.Module):
                     hidden_states,
                     forward_batch,
                     residual,
+                    steering_ctx=_steering_ctx,
                 )
+                # POST-LAYER projective steering (prefill-only, v1 compatible).
+                # v3: loops over k directions per layer.
+                if _has_steering and _steered_layers is not None and i in _steered_layers:
+                    _scale = self._steering_scales[i]
+                    _dirs_layer = self._steering_dirs[i] if hasattr(self, '_steering_dirs') else self._steering_dir.unsqueeze(0)
+                    for _ki in range(_steering_k):
+                        _dir = _dirs_layer[_ki]
+                        _proj = (hidden_states * _dir).sum(dim=-1, keepdim=True)
+                        _proj.clamp_(min=0)  # only subtract when aligned with refusal
+                        hidden_states = hidden_states - _scale * _proj * _dir
+                # Clamped projective decode steering (pre-allocated, CUDA-graph safe).
+                # v3: multi-layer decode with per-layer scales + multi-vector k-loop.
+                if _has_decode_steering and residual is not None:
+                    _should_decode_steer = (
+                        (_has_multi_layer_decode and i in _decode_steered_set) or
+                        (not _has_multi_layer_decode and i == _decode_peak_layer)
+                    )
+                    if _should_decode_steer:
+                        _bs = hidden_states.shape[0]
+                        _t1 = self._steer_dec_tmp1[:_bs]
+                        _t2 = self._steer_dec_tmp2[:_bs]
+                        _p  = self._steer_dec_proj[:_bs]
+                        # Per-layer decode scale (v3: already includes decode_scale*weight)
+                        # or global scale (v1/v2: single _steer_dec_scale value)
+                        # Note: _steer_dec_scales already has decode_scale baked in;
+                        # CUDA graph toggle zeros _steer_dec_scales directly.
+                        _dec_scale_i = self._steer_dec_scales[i] if _has_multi_layer_decode else self._steer_dec_scale
+                        torch.add(hidden_states, residual, out=_t1)
+                        for _ki in range(_steering_k):
+                            _dir_ki = self._steering_dirs[i][_ki]
+                            torch.mul(_t1, _dir_ki, out=_t2)
+                            _p.copy_(_t2.sum(dim=-1, keepdim=True))
+                            _p.clamp_(min=0)
+                            torch.mul(_p, _dir_ki, out=_t2)
+                            if _v4_adaptive:
+                                # DAS v4: momentum-adaptive scaling (CUDA-graph safe)
+                                # All ops are in-place on pre-allocated buffers.
+                                # 1. Mean projection → pre-allocated scalar
+                                torch.mean(_p, dim=0, out=self._v4_p_mean)
+                                # 2. EMA: momentum = decay*momentum + (1-decay)*mean
+                                self._steer_momentum.mul_(self._v4_ema_decay).add_(
+                                    self._v4_p_mean, alpha=self._v4_ema_complement)
+                                # 3. Sigmoid input: (momentum - center) * steepness → pre-alloc
+                                torch.sub(self._steer_momentum, self._v4_sig_center,
+                                          out=self._v4_sig_tmp)
+                                self._v4_sig_tmp.mul_(self._v4_sig_steep)
+                                # 4. Sigmoid → pre-alloc result
+                                torch.sigmoid(self._v4_sig_tmp, out=self._v4_sig_result)
+                                # 5. Apply: correction * base_scale * sigmoid * max_mult
+                                _t2.mul_(_dec_scale_i)
+                                _t2.mul_(self._v4_sig_result)
+                                _t2.mul_(self._v4_max_mult)
+                            else:
+                                _t2.mul_(_dec_scale_i)
+                            hidden_states.sub_(_t2)
+                            # Recompute h+residual for next direction (hidden_states changed)
+                            if _ki < _steering_k - 1:
+                                torch.add(hidden_states, residual, out=_t1)
+                _maybe_capture(hidden_states, i, forward_batch, n_layers=len(self.layers), residual=residual)
+
+        # Restore decode scale after per-request override
+        if _saved_dec_scale_for_override is not None:
+            self._steer_dec_scale.fill_(_saved_dec_scale_for_override)
+        if _saved_dec_scales_for_override is not None:
+            self._steer_dec_scales.copy_(_saved_dec_scales_for_override)
 
         if normal_end_layer != self.end_layer:
             hidden_states, residual = model_forward_maybe_tbo(
@@ -1029,8 +1415,242 @@ class Glm4MoeForCausalLM(nn.Module):
         # For EAGLE3 support
         self.capture_aux_hidden_states = False
 
+        # Initialize GPU-native steering buffers (CUDA-graph compatible)
+        self._init_steering()
+
     def get_input_embeddings(self) -> nn.Embedding:
         return self.model.embed_tokens
+
+    def _init_steering(self) -> None:
+        """Initialize GPU-native steering buffers for CUDA-graph compatible DAS.
+
+        DAS v3 supports:
+        - Multi-vector per-layer refusal directions [n_layers, k, hidden_size] (SVD)
+        - Backward compatible with [n_layers, hidden_size] (k=1) and [hidden_size] (single)
+        - Separate attn/MLP scales (--steering-attn-scale, --steering-mlp-scale)
+        - Trapezoidal or Gaussian kernel for layer weighting
+        - Three intervention points: post-attn (o_proj), post-MoE, post-layer (residual)
+        - Multi-layer decode steering with kernel-weighted per-layer scales
+        - Clamped projective decode steering with pre-allocated buffers
+        """
+        args = get_global_server_args()
+        if not getattr(args, 'steering_vector_path', None):
+            return
+
+        n_layers = self.config.num_hidden_layers
+        hid = self.config.hidden_size
+        n_dirs = int(getattr(args, 'steering_n_directions', 1))
+
+        # --- Load steering vectors ---
+        # DAS v3: per-layer vectors [n_layers, k, hidden_size] via --steering-per-layer-path
+        # DAS v2: per-layer vectors [n_layers, hidden_size] (auto-upgraded to k=1)
+        # DAS v1 fallback: single vector [hidden_size] via --steering-vector-path
+        per_layer_path = getattr(args, 'steering_per_layer_path', None)
+        if per_layer_path:
+            per_layer_vecs = torch.load(per_layer_path, map_location='cpu', weights_only=True)
+            # Backward compatibility: [n_layers, hidden_size] -> [n_layers, 1, hidden_size]
+            if per_layer_vecs.dim() == 2:
+                if per_layer_vecs.shape[0] != n_layers:
+                    raise ValueError(
+                        f"Per-layer vectors must have {n_layers} layers, got {per_layer_vecs.shape[0]}"
+                    )
+                per_layer_vecs = per_layer_vecs.unsqueeze(1)  # [n_layers, 1, hid]
+                logger.info(f"[steering] Upgraded 2D vectors to 3D: {per_layer_vecs.shape}")
+            elif per_layer_vecs.dim() == 3:
+                if per_layer_vecs.shape[0] != n_layers:
+                    raise ValueError(
+                        f"Per-layer vectors must have {n_layers} layers, got {per_layer_vecs.shape[0]}"
+                    )
+            else:
+                raise ValueError(
+                    f"Per-layer vectors must be 2D or 3D, got {per_layer_vecs.dim()}D: {per_layer_vecs.shape}"
+                )
+            # Clamp k to what's available in the file
+            k = min(n_dirs, per_layer_vecs.shape[1])
+            per_layer_vecs = per_layer_vecs[:, :k, :]  # [n_layers, k, hid]
+            # Normalize each direction
+            norms = per_layer_vecs.norm(dim=2, keepdim=True).clamp(min=1e-8)
+            per_layer_vecs = per_layer_vecs / norms
+            logger.info(f"[steering] Loaded per-layer directions: {per_layer_vecs.shape} (k={k})")
+            self.model._steering_per_layer = True
+        else:
+            # v1 fallback: broadcast single vector to all layers, k=1
+            vec = torch.load(args.steering_vector_path, map_location='cpu', weights_only=True)
+            if vec.dim() != 1:
+                raise ValueError(f"Steering vector must be 1-D, got shape {vec.shape}")
+            vec = vec.float()
+            vec = vec / vec.norm()
+            per_layer_vecs = vec.unsqueeze(0).unsqueeze(0).expand(n_layers, 1, -1).contiguous()
+            k = 1
+            logger.info(f"[steering] Using single vector broadcast to all layers: {vec.shape}")
+            self.model._steering_per_layer = False
+
+        # Store k for use in forward loops
+        self.model._steering_k = k
+
+        # Register per-layer direction matrix [n_layers, k, hidden_size] on Glm4MoeModel
+        self.model.register_buffer('_steering_dirs', per_layer_vecs.bfloat16())
+
+        # Also keep a single global direction for v1 decode steering compatibility
+        steering_layers_str = getattr(args, 'steering_layers', None)
+        center_layers = _json.loads(steering_layers_str) if steering_layers_str else [47]
+        peak_layer = int(center_layers[0]) if center_layers else 47
+        self.model.register_buffer('_steering_dir', per_layer_vecs[peak_layer, 0].clone().bfloat16())
+
+        # --- Compute layer weights (kernel) ---
+        mode = getattr(args, 'steering_mode', 'gaussian')
+        kernel = getattr(args, 'steering_kernel', mode)  # 'gaussian' or 'trapezoidal'
+        base_scale = float(getattr(args, 'steering_scale', 5.0))
+        sigma = float(getattr(args, 'steering_kernel_width', 2.0))
+
+        # Attn and MLP scales: if not specified, both default to base_scale
+        attn_scale = float(getattr(args, 'steering_attn_scale', 0.0))
+        mlp_scale = float(getattr(args, 'steering_mlp_scale', 0.0))
+
+        # v2 mode detection: if attn_scale or mlp_scale is set, use multi-point steering
+        self.model._steering_v2 = (attn_scale > 0.0 or mlp_scale > 0.0)
+
+        # Compute layer weight envelope (0-1 range, then scaled)
+        layer_weights = torch.zeros(n_layers, dtype=torch.float32)
+
+        if kernel == 'trapezoidal':
+            # Heretic-style trapezoidal: flat top around peak, linear ramp down
+            # Default range: L30-L65 for 92-layer model
+            trap_start = int(getattr(args, 'steering_trap_start', 30))
+            trap_end = int(getattr(args, 'steering_trap_end', 65))
+            trap_ramp = int(getattr(args, 'steering_trap_ramp', 5))
+            for i in range(n_layers):
+                if trap_start + trap_ramp <= i <= trap_end - trap_ramp:
+                    layer_weights[i] = 1.0
+                elif trap_start <= i < trap_start + trap_ramp:
+                    layer_weights[i] = (i - trap_start) / max(trap_ramp, 1)
+                elif trap_end - trap_ramp < i <= trap_end:
+                    layer_weights[i] = (trap_end - i) / max(trap_ramp, 1)
+            logger.info(f"[steering] Trapezoidal kernel: [{trap_start}, {trap_end}] ramp={trap_ramp}")
+        else:
+            # Gaussian kernel (v1 compatible)
+            for c in center_layers:
+                for i in range(n_layers):
+                    w = _math.exp(-0.5 * ((i - c) / sigma) ** 2)
+                    if w > layer_weights[i].item():
+                        layer_weights[i] = w
+            logger.info(f"[steering] Gaussian kernel: centers={center_layers}, sigma={sigma}")
+
+        # Compute per-layer scales for each intervention point
+        # v1 mode: base_scale applies to post-layer (hidden_states after MLP+residual)
+        # v2 mode: attn_scale applies post-attn, mlp_scale applies post-MoE
+        scales = layer_weights * base_scale  # post-layer scales (v1 compatible)
+        attn_scales = layer_weights * attn_scale  # post-attn scales (v2)
+        mlp_scales = layer_weights * mlp_scale  # post-MoE scales (v2)
+
+        self.model.register_buffer('_steering_scales', scales.bfloat16())
+        self.model.register_buffer('_steering_attn_scales', attn_scales.bfloat16())
+        self.model.register_buffer('_steering_mlp_scales', mlp_scales.bfloat16())
+
+        # Pre-compute active layer sets for each intervention point
+        # Only layers with non-zero scale generate GPU ops
+        _active_set = frozenset(int(i) for i in range(n_layers) if scales[i].item() > 1e-6)
+        _attn_active_set = frozenset(int(i) for i in range(n_layers) if attn_scales[i].item() > 1e-6)
+        _mlp_active_set = frozenset(int(i) for i in range(n_layers) if mlp_scales[i].item() > 1e-6)
+        self.model._steered_layer_set = _active_set
+        self.model._attn_steered_layer_set = _attn_active_set
+        self.model._mlp_steered_layer_set = _mlp_active_set
+        n_active = len(_active_set)
+        n_attn_active = len(_attn_active_set)
+        n_mlp_active = len(_mlp_active_set)
+
+        # --- Decode-time clamped projective steering ---
+        # v3: multi-layer decode with kernel-weighted per-layer scales
+        decode_scale = float(getattr(args, 'steering_decode_scale', 0.0))
+        self.model._decode_steer_peak_layer = peak_layer
+        if decode_scale > 0.0:
+            max_bs = getattr(args, 'cuda_graph_max_bs', 80)
+            self.model.register_buffer('_steer_dec_tmp1',
+                torch.zeros(max_bs, hid, dtype=torch.bfloat16))
+            self.model.register_buffer('_steer_dec_tmp2',
+                torch.zeros(max_bs, hid, dtype=torch.bfloat16))
+            self.model.register_buffer('_steer_dec_proj',
+                torch.zeros(max_bs, 1, dtype=torch.bfloat16))
+            self.model.register_buffer('_steer_dec_scale',
+                torch.tensor(decode_scale, dtype=torch.bfloat16))
+
+            # v3: compute per-layer decode scales (kernel-weighted)
+            # Parse decode layers: explicit list or auto-derive from kernel
+            decode_layers_str = getattr(args, 'steering_decode_layers', None)
+            if decode_layers_str:
+                decode_layers = _json.loads(decode_layers_str)
+            else:
+                # Auto: use layers with kernel weight > 0.1 (trapezoidal body or Gaussian core)
+                decode_layers = [peak_layer]
+
+            # Per-layer decode scales: decode_scale * layer_weights[i] for selected layers
+            decode_scales = torch.zeros(n_layers, dtype=torch.float32)
+            for dl in decode_layers:
+                if 0 <= dl < n_layers:
+                    w = layer_weights[dl].item()
+                    decode_scales[dl] = decode_scale * max(w, 0.1)  # minimum 0.1 for selected layers
+
+            self.model.register_buffer('_steer_dec_scales', decode_scales.bfloat16())
+            _decode_steered_set = frozenset(
+                int(i) for i in range(n_layers) if decode_scales[i].item() > 1e-6
+            )
+            self.model._decode_steered_set = _decode_steered_set
+            self.model._has_multi_layer_decode = len(_decode_steered_set) > 1
+
+            logger.info(
+                f"[steering] Clamped-projective decode steering: "
+                f"layers={sorted(_decode_steered_set)}, decode_scale={decode_scale}, "
+                f"max_bs={max_bs}, k={k}"
+            )
+        else:
+            self.model._steer_dec_scale = None
+            self.model._steer_dec_scales = None
+            self.model._decode_steered_set = frozenset()
+            self.model._has_multi_layer_decode = False
+
+        logger.info(
+            f"[steering] DAS {'v3' if k > 1 else ('v2' if self.model._steering_v2 else 'v1')} initialized: "
+            f"kernel={kernel}, center_layers={center_layers}, k={k}, "
+            f"base_scale={base_scale}, attn_scale={attn_scale}, mlp_scale={mlp_scale}, "
+            f"post-layer active={n_active}/{n_layers}, "
+            f"post-attn active={n_attn_active}/{n_layers}, "
+            f"post-MoE active={n_mlp_active}/{n_layers}, "
+            f"decode_layers={sorted(self.model._decode_steered_set) if self.model._decode_steered_set else 'none'}, "
+            f"per_layer={'yes' if self.model._steering_per_layer else 'no'}, "
+            f"decode_scale={decode_scale}"
+        )
+
+        # --- DAS v4: Momentum-adaptive decode steering ---
+        # CUDA-graph safe: all ops are in-place on pre-allocated buffers.
+        # Momentum persists across decode steps (graph replays reuse same tensors).
+        # Reset happens at prefill (eager mode) or via cuda_graph_runner on toggle.
+        self.model._v4_adaptive = (decode_scale > 0.0)
+        if self.model._v4_adaptive:
+            # Scalar momentum: EMA of projection magnitude (persists between replays)
+            self.model.register_buffer('_steer_momentum',
+                torch.zeros(1, dtype=torch.float32))
+            # Intermediate buffers for CUDA-graph-safe sigmoid computation
+            self.model.register_buffer('_v4_sig_tmp',
+                torch.zeros(1, dtype=torch.float32))
+            self.model.register_buffer('_v4_sig_result',
+                torch.zeros(1, dtype=torch.float32))
+            # Pre-allocated buffer for mean projection (avoids temp tensor)
+            self.model.register_buffer('_v4_p_mean',
+                torch.zeros(1, dtype=torch.float32))
+            # EMA config as registered buffers (move to GPU with model)
+            self.model.register_buffer('_v4_ema_decay',
+                torch.tensor(0.85, dtype=torch.float32))
+            self.model._v4_ema_complement = 0.15  # Python float, compile-time constant
+            self.model.register_buffer('_v4_max_mult',
+                torch.tensor(2.5, dtype=torch.bfloat16))
+            self.model.register_buffer('_v4_sig_center',
+                torch.tensor(0.3, dtype=torch.float32))
+            self.model.register_buffer('_v4_sig_steep',
+                torch.tensor(4.0, dtype=torch.float32))
+            logger.info(
+                f"[steering] DAS v4 momentum-adaptive decode enabled "
+                f"(ema_decay=0.85, max_mult=2.5, CUDA-graph safe)"
+            )
 
     def determine_num_fused_shared_experts(self):
         if get_global_server_args().disable_shared_experts_fusion:
@@ -1245,6 +1865,28 @@ class Glm4MoeForCausalLM(nn.Module):
                         weight_loader(param, loaded_weight)
                     else:
                         logger.warning(f"Parameter {name} not found in params_dict")
+
+        # Migrate steering buffers to GPU now that all model weights are loaded.
+        # Must be here (not in forward()) so the CPU→GPU copy happens BEFORE
+        # CUDA graph capture — otherwise the copy op gets embedded in the graph
+        # and the source CPU tensor may be GC'd before graph replay.
+        if hasattr(self.model, '_steering_dir') and self.model._steering_dir is not None:
+            if self.model._steering_dir.device.type == 'cpu':
+                try:
+                    _dev = next(self.parameters()).device
+                    # Core steering buffers (v1 + v2)
+                    for _buf_name in (
+                        "_steering_dir", "_steering_dirs",
+                        "_steering_scales", "_steering_attn_scales", "_steering_mlp_scales",
+                        "_steer_dec_tmp1", "_steer_dec_tmp2",
+                        "_steer_dec_proj", "_steer_dec_scale",
+                    ):
+                        _buf = getattr(self.model, _buf_name, None)
+                        if _buf is not None and hasattr(_buf, 'device') and _buf.device.type == "cpu":
+                            setattr(self.model, _buf_name, _buf.to(device=_dev, dtype=torch.bfloat16))
+                    logger.info(f"[steering] load_weights: migrated all steering buffers to {_dev}")
+                except StopIteration:
+                    pass  # no parameters yet, will migrate later
 
     def get_embed_and_head(self):
         return self.model.embed_tokens.weight, self.lm_head.weight

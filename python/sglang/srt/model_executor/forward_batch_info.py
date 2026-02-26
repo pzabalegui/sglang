@@ -56,6 +56,8 @@ from sglang.srt.model_executor.forward_batch_deepseek_mha_mixin import (
 )
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import get_compiler_backend, is_hip, is_npu, support_triton
+import logging as _logging
+_steering_logger = _logging.getLogger("sglang.steering")
 from sglang.srt.utils.common import ceil_align
 
 if TYPE_CHECKING:
@@ -68,6 +70,123 @@ if TYPE_CHECKING:
     from sglang.srt.speculative.spec_info import SpecInput, SpeculativeAlgorithm
 
 _is_npu = is_npu()
+
+
+@dataclass
+class SteeringConfig:
+    """Configuration for steering vector manipulation during inference.
+
+    DAS v1: Single global direction with Gaussian/single layer weighting.
+    DAS v2: Per-layer directions with separate attn/MLP scales and trapezoidal kernel.
+
+    Formula: h' = h - effective_scale * (h . r_hat) * r_hat
+    """
+    direction: torch.Tensor  # [hidden_size] global direction (v1 compatible)
+    scale: float = 1.0
+    layers: Optional[List[int]] = None
+    enabled: bool = True
+    # Per-layer weights (computed from Gaussian/trapezoidal kernel). Overrides scale+layers.
+    layer_weights: Optional[Dict[int, float]] = None
+    # DAS v2: separate attn/MLP scales
+    attn_scale: float = 0.0
+    mlp_scale: float = 0.0
+
+    def should_apply_to_layer(self, layer_idx: int) -> bool:
+        """Check if steering should be applied to a specific layer."""
+        if not self.enabled:
+            return False
+        if self.layer_weights is not None:
+            return layer_idx in self.layer_weights
+        if self.layers is None:
+            return True
+        return layer_idx in self.layers
+
+    def get_effective_scale(self, layer_idx: int) -> float:
+        """Get the effective scale for a specific layer."""
+        if self.layer_weights is not None and layer_idx in self.layer_weights:
+            return self.layer_weights[layer_idx]
+        return self.scale
+
+
+def apply_steering(
+    hidden_states: torch.Tensor,
+    steering_config: Optional[SteeringConfig],
+    layer_idx: int,
+    residual: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Apply steering vector to hidden states using projective subtraction.
+
+    Formula: h' = h - scale * (h · r̂) * r̂
+
+    Projection is computed on hidden_states (MLP delta), NOT h+residual.
+    Validated empirically: h+residual garbles harmless queries at scale >= 2.0.
+    For decode-time clamped steering (which DOES use h+residual), see glm4_moe.py.
+
+    Args:
+        hidden_states: Output of the current layer's MLP [num_tokens, hidden_size]
+        steering_config: Steering configuration
+        layer_idx: Current layer index
+        residual: Unused, kept for API compatibility
+
+    Returns:
+        Modified hidden_states with refusal direction projected out
+    """
+    if steering_config is None:
+        return hidden_states
+    if not steering_config.should_apply_to_layer(layer_idx):
+        return hidden_states
+    if not steering_config.enabled:
+        return hidden_states
+
+    direction = steering_config.direction.to(
+        device=hidden_states.device,
+        dtype=hidden_states.dtype
+    )
+    direction = direction / direction.norm()
+
+    # Projection on hidden_states (layer delta), NOT h+residual
+    proj_scalar = (hidden_states * direction).sum(dim=-1, keepdim=True)
+
+    effective_scale = steering_config.get_effective_scale(layer_idx)
+
+    # PROJECTIVE: h' = h - scale * (h · r̂) * r̂
+    modified = hidden_states - effective_scale * proj_scalar * direction
+
+    return modified
+
+
+def apply_steering_to_residual(
+    residual: torch.Tensor,
+    steering_config: Optional[SteeringConfig],
+    layer_idx: int,
+) -> torch.Tensor:
+    """Apply steering to the residual stream BEFORE layer computation.
+    
+    The residual holds the accumulated representation. By removing the
+    refusal direction from the residual before prepare_attn, both the
+    attention and MLP see cleaned inputs. This approximates orthogonalization.
+    
+    Formula: res' = res - scale * (res . r_hat) * r_hat
+    """
+    if steering_config is None:
+        return residual
+    if not steering_config.should_apply_to_layer(layer_idx):
+        return residual
+    
+    direction = steering_config.direction.to(
+        device=residual.device, dtype=residual.dtype
+    )
+    direction = direction / direction.norm()
+    
+    # Project residual onto refusal direction
+    proj_scalar = (residual * direction).sum(dim=-1, keepdim=True)
+    
+    # CLAMPED: only steer tokens with positive projection (refusal-aligned)
+    proj_scalar = proj_scalar.clamp(min=0)
+    
+    # Remove the refusal component from residual
+    effective_scale = steering_config.get_effective_scale(layer_idx)
+    return residual - effective_scale * proj_scalar * direction
 
 
 class ForwardMode(IntEnum):
@@ -376,6 +495,14 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
     # For hidden states before normal
     return_hidden_states_before_norm: bool = False
 
+    # Steering vector configuration for abliteration
+    steering_config: Optional[SteeringConfig] = None
+
+    # Per-request steering toggle: True when steering_enabled=False in request
+    steering_disabled: bool = False
+    # Per-request decode scale override (None = use server default)
+    steering_decode_scale_override: float = None
+
     @classmethod
     def init_new(
         cls,
@@ -422,6 +549,60 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             return_hidden_states_before_norm=batch.return_hidden_states_before_norm,
         )
         device = model_runner.device
+
+        # Per-request steering toggle + decode scale override
+        if hasattr(batch, "reqs") and batch.reqs:
+            for req in batch.reqs:
+                se = getattr(req, "steering_enabled", None)
+                if se is False:
+                    ret.steering_disabled = True
+                # Per-request decode scale override (first non-None wins)
+                _ds = getattr(req, "steering_decode_scale", None)
+                if _ds is not None and ret.steering_decode_scale_override is None:
+                    ret.steering_decode_scale_override = float(_ds)
+
+        # Copy steering config from model runner if available
+        # Copy steering config from model runner, with per-request override
+        base_config = getattr(model_runner, "steering_config", None)
+        if base_config is not None:
+            # Check for per-request override from any request in batch
+            override_enabled = None
+            override_scale = None
+            if hasattr(batch, "reqs") and batch.reqs:
+                for req in batch.reqs:
+                    if hasattr(req, "steering_enabled") and req.steering_enabled is not None:
+                        override_enabled = req.steering_enabled
+                    if hasattr(req, "steering_scale") and req.steering_scale is not None:
+                        override_scale = req.steering_scale
+
+            # Apply overrides if present
+            if override_enabled is False:
+                ret.steering_config = None  # Disable steering for this batch
+            elif override_scale is not None:
+                # Create modified config with new scale
+                # Recompute layer_weights if base has Gaussian kernel
+                if base_config.layer_weights is not None:
+                    # Scale all layer weights proportionally
+                    scale_ratio = override_scale / max(base_config.layer_weights.values())
+                    new_weights = {l: w * scale_ratio for l, w in base_config.layer_weights.items()}
+                    ret.steering_config = SteeringConfig(
+                        direction=base_config.direction,
+                        scale=override_scale,
+                        layers=base_config.layers,
+                        enabled=base_config.enabled,
+                        layer_weights=new_weights,
+                    )
+                else:
+                    ret.steering_config = SteeringConfig(
+                        direction=base_config.direction,
+                        scale=override_scale,
+                        layers=base_config.layers,
+                        enabled=base_config.enabled,
+                    )
+            else:
+                ret.steering_config = base_config  # Use server default
+        else:
+            ret.steering_config = None
 
         if batch.extend_input_logprob_token_ids is not None:
             ret.extend_input_logprob_token_ids_gpu = (

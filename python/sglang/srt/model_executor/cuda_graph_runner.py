@@ -859,7 +859,62 @@ class CudaGraphRunner:
             graph_key = f"{get_current_stream_idx()}_{self.bs}"
         else:
             graph_key = self.bs
+        # Per-request steering toggle + decode scale override (patched v4)
+        # Buffers are on model.model (Glm4MoeModel), not model (Glm4MoeForCausalLM)
+        _steer_restore = {}
+        _inner = getattr(self.model_runner.model, 'model', self.model_runner.model)
+        _steering_off = getattr(forward_batch, 'steering_disabled', False)
+        _ds_override = getattr(forward_batch, 'steering_decode_scale_override', None)
+
+        if _steering_off:
+            # Zero all steering scales (full disable)
+            if hasattr(_inner, '_steer_dec_scale') and _inner._steer_dec_scale is not None:
+                _steer_restore['dec_scale'] = _inner._steer_dec_scale.item()
+                _inner._steer_dec_scale.fill_(0.0)
+            if hasattr(_inner, '_steer_dec_scales') and _inner._steer_dec_scales is not None:
+                _steer_restore['dec_scales'] = _inner._steer_dec_scales.clone()
+                _inner._steer_dec_scales.zero_()
+            if hasattr(_inner, '_steering_scales') and _inner._steering_scales is not None:
+                _steer_restore['scales'] = _inner._steering_scales.clone()
+                _inner._steering_scales.zero_()
+            if hasattr(_inner, '_steering_attn_scales') and _inner._steering_attn_scales is not None:
+                _steer_restore['attn_scales'] = _inner._steering_attn_scales.clone()
+                _inner._steering_attn_scales.zero_()
+            if hasattr(_inner, '_steering_mlp_scales') and _inner._steering_mlp_scales is not None:
+                _steer_restore['mlp_scales'] = _inner._steering_mlp_scales.clone()
+                _inner._steering_mlp_scales.zero_()
+            # v4: zero momentum to prevent stale accumulation
+            if hasattr(_inner, '_steer_momentum') and _inner._steer_momentum is not None:
+                _steer_restore['momentum'] = _inner._steer_momentum.clone()
+                _inner._steer_momentum.zero_()
+        elif _ds_override is not None:
+            # Per-request decode scale override (not full disable)
+            if hasattr(_inner, '_steer_dec_scale') and _inner._steer_dec_scale is not None:
+                _steer_restore['dec_scale'] = _inner._steer_dec_scale.item()
+                _old_global = _steer_restore['dec_scale']
+                _inner._steer_dec_scale.fill_(float(_ds_override))
+                if hasattr(_inner, '_steer_dec_scales') and _inner._steer_dec_scales is not None and _old_global > 0:
+                    _steer_restore['dec_scales'] = _inner._steer_dec_scales.clone()
+                    _ratio = float(_ds_override) / _old_global
+                    _inner._steer_dec_scales.mul_(_ratio)
+
         self.graphs[graph_key].replay()
+
+        # Restore all steering scales after replay
+        if _steer_restore:
+            if 'dec_scale' in _steer_restore:
+                _inner._steer_dec_scale.fill_(_steer_restore['dec_scale'])
+            if 'dec_scales' in _steer_restore:
+                _inner._steer_dec_scales.copy_(_steer_restore['dec_scales'])
+            if 'scales' in _steer_restore:
+                _inner._steering_scales.copy_(_steer_restore['scales'])
+            if 'attn_scales' in _steer_restore:
+                _inner._steering_attn_scales.copy_(_steer_restore['attn_scales'])
+            if 'mlp_scales' in _steer_restore:
+                _inner._steering_mlp_scales.copy_(_steer_restore['mlp_scales'])
+            if 'momentum' in _steer_restore:
+                _inner._steer_momentum.copy_(_steer_restore['momentum'])
+
         output = self.output_buffers[graph_key]
 
         if isinstance(output, LogitsProcessorOutput):
