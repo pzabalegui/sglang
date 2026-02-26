@@ -495,10 +495,12 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
     # Steering vector configuration for abliteration
     steering_config: Optional[SteeringConfig] = None
 
-    # Per-request steering toggle: True when steering_enabled=False in request
+    # Per-request steering toggle: True when ALL requests have steering_enabled=False
     steering_disabled: bool = False
     # Per-request decode scale override (None = use server default)
     steering_decode_scale_override: float = None
+    # Per-request steering mask: list of 1.0/0.0 per request in batch (None = all ON)
+    steering_mask_values: object = None
 
     # For dumper: request IDs for cross-step sequence tracking
     rids: Optional[List[str]] = None
@@ -553,14 +555,26 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
 
         # Per-request steering toggle + decode scale override
         if hasattr(batch, "reqs") and batch.reqs:
+            _mask_vals = []
+            _any_off = False
+            _all_off = True
             for req in batch.reqs:
                 se = getattr(req, "steering_enabled", None)
                 if se is False:
-                    ret.steering_disabled = True
+                    _mask_vals.append(0.0)
+                    _any_off = True
+                else:
+                    _mask_vals.append(1.0)
+                    _all_off = False
                 # Per-request decode scale override (first non-None wins)
                 _ds = getattr(req, "steering_decode_scale", None)
                 if _ds is not None and ret.steering_decode_scale_override is None:
                     ret.steering_decode_scale_override = float(_ds)
+            # Full disable only when ALL requests have steering off
+            ret.steering_disabled = _all_off
+            # Per-request mask (None if all ON for backward compat)
+            if _any_off:
+                ret.steering_mask_values = _mask_vals
 
         # Copy steering config from model runner if available
         # Copy steering config from model runner, with per-request override

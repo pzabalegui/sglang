@@ -1324,25 +1324,27 @@ class Glm4MoeModel(nn.Module):
                             _p.clamp_(min=0)
                             torch.mul(_p, _dir_ki, out=_t2)
                             if _v4_adaptive:
-                                # DAS v4: momentum-adaptive scaling (CUDA-graph safe)
-                                # All ops are in-place on pre-allocated buffers.
-                                # 1. Mean projection → pre-allocated scalar
-                                torch.mean(_p, dim=0, out=self._v4_p_mean)
-                                # 2. EMA: momentum = decay*momentum + (1-decay)*mean
-                                self._steer_momentum.mul_(self._v4_ema_decay).add_(
-                                    self._v4_p_mean, alpha=self._v4_ema_complement)
-                                # 3. Sigmoid input: (momentum - center) * steepness → pre-alloc
-                                torch.sub(self._steer_momentum, self._v4_sig_center,
-                                          out=self._v4_sig_tmp)
-                                self._v4_sig_tmp.mul_(self._v4_sig_steep)
-                                # 4. Sigmoid → pre-alloc result
-                                torch.sigmoid(self._v4_sig_tmp, out=self._v4_sig_result)
-                                # 5. Apply: correction * base_scale * sigmoid * max_mult
+                                # DAS v4: per-request momentum-adaptive scaling (CUDA-graph safe)
+                                # Each row in the batch has its own momentum/sigmoid.
+                                _mom = self._steer_momentum[:_bs]
+                                # 1. Per-request EMA: momentum[i] = decay*momentum[i] + (1-decay)*proj[i]
+                                _mom.mul_(self._v4_ema_decay).add_(
+                                    _p, alpha=self._v4_ema_complement)
+                                # 2. Sigmoid input: (momentum - center) * steepness
+                                _stmp = self._v4_sig_tmp[:_bs]
+                                torch.sub(_mom, self._v4_sig_center, out=_stmp)
+                                _stmp.mul_(self._v4_sig_steep)
+                                # 3. Sigmoid → per-request adaptive scale [bs, 1]
+                                _sres = self._v4_sig_result[:_bs]
+                                torch.sigmoid(_stmp, out=_sres)
+                                # 4. Apply: correction * base_scale * sigmoid * max_mult * mask
                                 _t2.mul_(_dec_scale_i)
-                                _t2.mul_(self._v4_sig_result)
+                                _t2.mul_(_sres)
                                 _t2.mul_(self._v4_max_mult)
+                                _t2.mul_(self._steering_mask[:_bs])
                             else:
                                 _t2.mul_(_dec_scale_i)
+                                _t2.mul_(self._steering_mask[:_bs])
                             hidden_states.sub_(_t2)
                             # Recompute h+residual for next direction (hidden_states changed)
                             if _ki < _steering_k - 1:
@@ -1625,18 +1627,19 @@ class Glm4MoeForCausalLM(nn.Module):
         # Momentum persists across decode steps (graph replays reuse same tensors).
         # Reset happens at prefill (eager mode) or via cuda_graph_runner on toggle.
         self.model._v4_adaptive = (decode_scale > 0.0)
+        _v4_max_bs = getattr(args, 'cuda_graph_max_bs', 80)
         if self.model._v4_adaptive:
-            # Scalar momentum: EMA of projection magnitude (persists between replays)
+            # Per-request momentum: each slot in the decode batch has its own EMA
             self.model.register_buffer('_steer_momentum',
-                torch.zeros(1, dtype=torch.float32))
-            # Intermediate buffers for CUDA-graph-safe sigmoid computation
+                torch.zeros(_v4_max_bs, 1, dtype=torch.float32))
+            # Per-request sigmoid intermediates
             self.model.register_buffer('_v4_sig_tmp',
-                torch.zeros(1, dtype=torch.float32))
+                torch.zeros(_v4_max_bs, 1, dtype=torch.float32))
             self.model.register_buffer('_v4_sig_result',
-                torch.zeros(1, dtype=torch.float32))
-            # Pre-allocated buffer for mean projection (avoids temp tensor)
-            self.model.register_buffer('_v4_p_mean',
-                torch.zeros(1, dtype=torch.float32))
+                torch.zeros(_v4_max_bs, 1, dtype=torch.float32))
+            # Per-request steering mask: 1.0=ON, 0.0=OFF (CUDA-graph safe)
+            self.model.register_buffer('_steering_mask',
+                torch.ones(_v4_max_bs, 1, dtype=torch.bfloat16))
             # EMA config as registered buffers (move to GPU with model)
             self.model.register_buffer('_v4_ema_decay',
                 torch.tensor(0.85, dtype=torch.float32))
@@ -1649,7 +1652,7 @@ class Glm4MoeForCausalLM(nn.Module):
                 torch.tensor(4.0, dtype=torch.float32))
             logger.info(
                 f"[steering] DAS v4 momentum-adaptive decode enabled "
-                f"(ema_decay=0.85, max_mult=2.5, CUDA-graph safe)"
+                f"(ema_decay=0.85, max_mult=2.5, per-request isolation, CUDA-graph safe)"
             )
 
     def determine_num_fused_shared_experts(self):

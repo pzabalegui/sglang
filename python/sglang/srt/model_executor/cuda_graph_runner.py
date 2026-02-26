@@ -1060,15 +1060,34 @@ class CudaGraphRunner:
             graph_key = f"{get_current_stream_idx()}_{self.bs}"
         else:
             graph_key = self.bs
-        # Per-request steering toggle + decode scale override (patched v4)
+        # Per-request steering toggle + decode scale override (patched v4 per-request)
         # Buffers are on model.model (Glm4MoeModel), not model (Glm4MoeForCausalLM)
         _steer_restore = {}
         _inner = getattr(self.model_runner.model, 'model', self.model_runner.model)
         _steering_off = getattr(forward_batch, 'steering_disabled', False)
         _ds_override = getattr(forward_batch, 'steering_decode_scale_override', None)
+        _mask_vals = getattr(forward_batch, 'steering_mask_values', None)
+
+        # Set per-request steering mask on model buffer
+        if hasattr(_inner, '_steering_mask') and _inner._steering_mask is not None:
+            import torch as _torch
+            if _steering_off:
+                # All OFF: zero entire mask
+                _steer_restore['mask'] = _inner._steering_mask[:self.bs].clone()
+                _inner._steering_mask[:self.bs].zero_()
+            elif _mask_vals is not None:
+                # Mixed ON/OFF: set per-request
+                _steer_restore['mask'] = _inner._steering_mask[:self.bs].clone()
+                _bs_actual = min(len(_mask_vals), self.bs)
+                _inner._steering_mask[:_bs_actual, 0] = _torch.tensor(
+                    _mask_vals[:_bs_actual], dtype=_inner._steering_mask.dtype,
+                    device=_inner._steering_mask.device)
+            else:
+                # All ON: ensure mask is 1.0
+                _inner._steering_mask[:self.bs].fill_(1.0)
 
         if _steering_off:
-            # Zero all steering scales (full disable)
+            # Zero all steering scales (full disable — optimization, mask already handles it)
             if hasattr(_inner, '_steer_dec_scale') and _inner._steer_dec_scale is not None:
                 _steer_restore['dec_scale'] = _inner._steer_dec_scale.item()
                 _inner._steer_dec_scale.fill_(0.0)
@@ -1084,10 +1103,19 @@ class CudaGraphRunner:
             if hasattr(_inner, '_steering_mlp_scales') and _inner._steering_mlp_scales is not None:
                 _steer_restore['mlp_scales'] = _inner._steering_mlp_scales.clone()
                 _inner._steering_mlp_scales.zero_()
-            # v4: zero momentum to prevent stale accumulation
+            # v4: zero momentum for disabled slots
             if hasattr(_inner, '_steer_momentum') and _inner._steer_momentum is not None:
-                _steer_restore['momentum'] = _inner._steer_momentum.clone()
-                _inner._steer_momentum.zero_()
+                _steer_restore['momentum'] = _inner._steer_momentum[:self.bs].clone()
+                _inner._steer_momentum[:self.bs].zero_()
+        elif _mask_vals is not None:
+            # Mixed batch: zero momentum only for OFF slots
+            if hasattr(_inner, '_steer_momentum') and _inner._steer_momentum is not None:
+                import torch as _torch
+                _steer_restore['momentum'] = _inner._steer_momentum[:self.bs].clone()
+                _bs_actual = min(len(_mask_vals), self.bs)
+                for _mi in range(_bs_actual):
+                    if _mask_vals[_mi] < 0.5:
+                        _inner._steer_momentum[_mi].zero_()
         elif _ds_override is not None:
             # Per-request decode scale override (not full disable)
             if hasattr(_inner, '_steer_dec_scale') and _inner._steer_dec_scale is not None:
@@ -1101,8 +1129,10 @@ class CudaGraphRunner:
 
         self.graphs[graph_key].replay()
 
-        # Restore all steering scales after replay
+        # Restore all steering buffers after replay
         if _steer_restore:
+            if 'mask' in _steer_restore:
+                _inner._steering_mask[:self.bs].copy_(_steer_restore['mask'])
             if 'dec_scale' in _steer_restore:
                 _inner._steer_dec_scale.fill_(_steer_restore['dec_scale'])
             if 'dec_scales' in _steer_restore:
@@ -1114,7 +1144,7 @@ class CudaGraphRunner:
             if 'mlp_scales' in _steer_restore:
                 _inner._steering_mlp_scales.copy_(_steer_restore['mlp_scales'])
             if 'momentum' in _steer_restore:
-                _inner._steer_momentum.copy_(_steer_restore['momentum'])
+                _inner._steer_momentum[:self.bs].copy_(_steer_restore['momentum'])
 
         output = self.output_buffers[graph_key]
 
