@@ -21,8 +21,9 @@ with open(SA_FILE, "r") as f:
 # =============================================
 # Part 1: Add dataclass fields to ServerArgs
 # =============================================
-if "steering_vector_path" in content and "steering_attn_scale" in content and "steering_n_directions" in content:
-    print("server_args.py: Already fully patched (v1 + v2 + v3). Skipping.")
+if ("steering_vector_path" in content and "steering_attn_scale" in content
+        and "steering_n_directions" in content and "steering_intervention_mode" in content):
+    print("server_args.py: Already fully patched (v1 + v2 + v3 + WRMD). Skipping.")
     sys.exit(0)
 
 # Determine if v1 fields already exist
@@ -57,7 +58,10 @@ if not has_v1:
     steering_kernel_width: float = 2.0
     steering_trap_start: int = 30
     steering_trap_end: int = 65
-    steering_trap_ramp: int = 5"""
+    steering_trap_ramp: int = 5
+    # === WRMD Additive steering ===
+    steering_intervention_mode: str = "projective"
+    steering_layer_coeffs_path: Optional[str] = None"""
 
     content = content.replace(target_field, target_field + steering_fields, 1)
     print("Added v1 + v2 steering dataclass fields")
@@ -79,30 +83,51 @@ elif "steering_attn_scale" not in content:
     steering_kernel: str = "gaussian"  # 'gaussian' or 'trapezoidal'
     steering_trap_start: int = 30
     steering_trap_end: int = 65
-    steering_trap_ramp: int = 5"""
+    steering_trap_ramp: int = 5
+    # === WRMD Additive steering ===
+    steering_intervention_mode: str = "projective"
+    steering_layer_coeffs_path: Optional[str] = None"""
         content = content.replace(target_field, target_field + v2_fields, 1)
         print("Added v2+v3 steering dataclass fields (v1 already present)")
     else:
         print("WARNING: Could not find v1 steering fields to extend")
 elif "steering_n_directions" not in content:
-    # v1+v2 exist, add v3 fields
+    # v1+v2 exist, add v3 + WRMD fields
     target_field = "    steering_trap_ramp: int = 5"
     if target_field in content:
         v3_fields = """
     # === DAS v3 additions ===
     steering_n_directions: int = 1
-    steering_decode_layers: Optional[str] = None  # JSON list, e.g. '[35,40,47,55,60]'"""
+    steering_decode_layers: Optional[str] = None  # JSON list, e.g. '[35,40,47,55,60]'
+    # === WRMD Additive steering ===
+    steering_intervention_mode: str = "projective"
+    steering_layer_coeffs_path: Optional[str] = None"""
         content = content.replace(target_field, target_field + v3_fields, 1)
-        print("Added v3 steering dataclass fields (v1+v2 already present)")
+        print("Added v3+WRMD steering dataclass fields (v1+v2 already present)")
     else:
         print("WARNING: Could not find v2 steering fields to extend")
+elif "steering_intervention_mode" not in content:
+    # v1+v2+v3 exist, add WRMD-only fields
+    target_field_wrmd = "    steering_decode_layers: Optional[str] = None  # JSON list, e.g. '[35,40,47,55,60]'"
+    if target_field_wrmd not in content:
+        target_field_wrmd = "    steering_trap_ramp: int = 5"
+    if target_field_wrmd in content:
+        wrmd_fields = """
+    # === WRMD Additive steering ===
+    steering_intervention_mode: str = "projective"
+    steering_layer_coeffs_path: Optional[str] = None"""
+        content = content.replace(target_field_wrmd, target_field_wrmd + wrmd_fields, 1)
+        print("Added WRMD dataclass fields (v1+v2+v3 already present)")
+    else:
+        print("WARNING: Could not find insertion point for WRMD fields")
 
 # =============================================
 # Part 2: Add CLI args inside add_cli_args()
 # =============================================
 # Find the add_cli_args method and a suitable insertion point inside it
-if "steering-vector-path" in content and "steering-attn-scale" in content and "steering-n-directions" in content:
-    print("CLI args already fully patched (v1+v2+v3). Skipping.")
+if ("steering-vector-path" in content and "steering-attn-scale" in content
+        and "steering-n-directions" in content and "steering-intervention-mode" in content):
+    print("CLI args already fully patched (v1+v2+v3+WRMD). Skipping.")
 else:
     # Find the end of add_cli_args() - look for the return statement
     target_cli = '        return parser'
@@ -150,10 +175,16 @@ else:
             help="DAS v2: trapezoidal kernel end layer")
         parser.add_argument("--steering-trap-ramp", type=int, default=5,
             help="DAS v2: trapezoidal kernel ramp width")
+        # === WRMD Additive steering CLI args ===
+        parser.add_argument("--steering-intervention-mode", type=str, default="projective",
+            choices=["projective", "additive"],
+            help="Steering type: 'projective' (remove projection) or 'additive' (add direction)")
+        parser.add_argument("--steering-layer-coeffs-path", type=str, default=None,
+            help="Path to per-layer scaling coefficients (.pt, shape [n_layers])")
 
 """
         content = content.replace(target_cli, cli_args + target_cli, 1)
-        print("Added all DAS v1 + v2 + v3 CLI args to add_cli_args()")
+        print("Added all DAS v1 + v2 + v3 + WRMD CLI args to add_cli_args()")
     elif "steering-attn-scale" not in content:
         # v1 CLI exists, add v2+v3 CLI args after the last v1 arg
         # Find the last v1 steering arg
@@ -189,9 +220,15 @@ else:
             help="DAS v2: trapezoidal kernel end layer")
         parser.add_argument("--steering-trap-ramp", type=int, default=5,
             help="DAS v2: trapezoidal kernel ramp width")
+        # === WRMD Additive steering CLI args ===
+        parser.add_argument("--steering-intervention-mode", type=str, default="projective",
+            choices=["projective", "additive"],
+            help="Steering type: 'projective' (remove projection) or 'additive' (add direction)")
+        parser.add_argument("--steering-layer-coeffs-path", type=str, default=None,
+            help="Path to per-layer scaling coefficients (.pt, shape [n_layers])")
 """
             content = content.replace(last_v1_arg, last_v1_arg + v2_cli, 1)
-            print("Added v2+v3 CLI args after existing v1 args")
+            print("Added v2+v3+WRMD CLI args after existing v1 args")
         else:
             print("WARNING: Could not find last v1 CLI arg to extend")
     elif "steering-n-directions" not in content:
@@ -204,11 +241,38 @@ else:
             help="DAS v3: number of SVD directions per layer (1=v2 compat)")
         parser.add_argument("--steering-decode-layers", type=str, default=None,
             help="DAS v3: JSON list of decode steering layers, e.g. '[35,40,47,55,60]'")
+        # === WRMD Additive steering CLI args ===
+        parser.add_argument("--steering-intervention-mode", type=str, default="projective",
+            choices=["projective", "additive"],
+            help="Steering type: 'projective' (remove projection) or 'additive' (add direction)")
+        parser.add_argument("--steering-layer-coeffs-path", type=str, default=None,
+            help="Path to per-layer scaling coefficients (.pt, shape [n_layers])")
 """
             content = content.replace(last_v2_arg, last_v2_arg + v3_cli, 1)
-            print("Added v3 CLI args after existing v2 args")
+            print("Added v3+WRMD CLI args after existing v2 args")
         else:
             print("WARNING: Could not find last v2 CLI arg to extend")
+    elif "steering-intervention-mode" not in content:
+        # v1+v2+v3 CLI exist, add WRMD-only CLI args
+        last_existing_arg = 'help="DAS v3: JSON list of decode steering layers'
+        idx = content.find(last_existing_arg)
+        if idx < 0:
+            last_existing_arg = 'help="DAS v2: trapezoidal kernel ramp width")'
+            idx = content.find(last_existing_arg)
+        if idx >= 0:
+            end_idx = content.find("\n", idx)
+            wrmd_cli = """
+        # === WRMD Additive steering CLI args ===
+        parser.add_argument("--steering-intervention-mode", type=str, default="projective",
+            choices=["projective", "additive"],
+            help="Steering type: 'projective' (remove projection) or 'additive' (add direction)")
+        parser.add_argument("--steering-layer-coeffs-path", type=str, default=None,
+            help="Path to per-layer scaling coefficients (.pt, shape [n_layers])")
+"""
+            content = content[:end_idx + 1] + wrmd_cli + content[end_idx + 1:]
+            print("Added WRMD CLI args after existing v1+v2+v3 args")
+        else:
+            print("WARNING: Could not find insertion point for WRMD CLI args")
 
 with open(SA_FILE, "w") as f:
     f.write(content)
