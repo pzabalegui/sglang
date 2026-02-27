@@ -1302,11 +1302,16 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
         hid = text_config.hidden_size
         n_dirs = int(getattr(args, "steering_n_directions", 1))
 
+        # Detect target device: model.embed_tokens should already be on CUDA
+        # during SGLang initialization (inside `with target_device:` context)
+        _target_device = next(self.model.parameters()).device
+        logger.info(f"[steering] Target device for buffers: {_target_device}")
+
         # --- Load steering vectors ---
         per_layer_path = getattr(args, "steering_per_layer_path", None)
         if per_layer_path:
             per_layer_vecs = torch.load(
-                per_layer_path, map_location="cpu", weights_only=True
+                per_layer_path, map_location=_target_device, weights_only=True
             )
             if per_layer_vecs.dim() == 2:
                 if per_layer_vecs.shape[0] != n_layers:
@@ -1340,7 +1345,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
             self.model._steering_per_layer = True
         else:
             vec = torch.load(
-                args.steering_vector_path, map_location="cpu", weights_only=True
+                args.steering_vector_path, map_location=_target_device, weights_only=True
             )
             if vec.dim() != 1:
                 raise ValueError(f"Steering vector must be 1-D, got shape {vec.shape}")
