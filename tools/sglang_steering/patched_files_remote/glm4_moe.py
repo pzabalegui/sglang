@@ -188,6 +188,119 @@ _device_sm = get_device_sm()
 logger = logging.getLogger(__name__)
 
 
+# ============================================================
+# DAS v4: Adaptive decode steering via PyTorch forward hooks
+# Requires --disable-cuda-graph (hooks don't fire during CUDA graph replay).
+# When active, inline decode steering is disabled to avoid double-steering.
+# ============================================================
+
+_V4_DEFAULT_CONFIG = {
+    "base_scale": 2.0,
+    "max_scale_mult": 2.5,
+    "ema_decay": 0.85,
+    "sigmoid_steepness": 4.0,
+    "sigmoid_center": 0.3,
+    "proj_threshold": 0.01,
+}
+
+
+class _DecodeSteeringHook:
+    """Per-layer decode steering hook with momentum-adaptive scale.
+
+    Registered via register_forward_hook on each Glm4MoeDecoderLayer.
+    Only fires during decode mode. Uses EMA momentum tracking to
+    adaptively scale steering: high momentum (model keeps projecting onto
+    refusal) → increased steering scale via sigmoid mapping.
+    """
+
+    def __init__(self, layer_idx, directions, layer_weight, config, device):
+        self.layer_idx = layer_idx
+        self.config = config
+        self.layer_weight = layer_weight
+        self.k = directions.shape[0]
+        self.directions = directions.to(device=device, dtype=torch.bfloat16)
+        norms = self.directions.norm(dim=1, keepdim=True).clamp(min=1e-8)
+        self.directions = self.directions / norms
+        self.momentum = torch.zeros(1, device=device, dtype=torch.float32)
+        self.step_count = 0
+        self.total_projections = 0
+        self.total_steered = 0
+
+    def reset_momentum(self):
+        self.momentum.zero_()
+        self.step_count = 0
+
+    def __call__(self, module, input, output):
+        """Post-forward hook on Glm4MoeDecoderLayer.
+
+        Args:
+            module: the decoder layer
+            input: (positions, hidden_states, forward_batch, residual, ...)
+            output: (hidden_states, residual)
+        """
+        if not isinstance(output, tuple) or len(output) != 2:
+            return output
+
+        hidden_states, residual = output
+
+        # Only steer during decode
+        forward_batch = input[2]
+        if not forward_batch.forward_mode.is_decode():
+            self.reset_momentum()
+            return output
+
+        # Per-request steering toggle
+        if getattr(forward_batch, 'steering_disabled', False):
+            return output
+
+        if residual is None:
+            return output
+
+        if self.layer_weight < 1e-6:
+            return output
+
+        # Lazy device transfer: directions are created on CPU during _init_steering()
+        # and need to move to the correct GPU on first use.
+        if self.directions.device != hidden_states.device:
+            self.directions = self.directions.to(device=hidden_states.device)
+            self.momentum = self.momentum.to(device=hidden_states.device)
+
+        h_plus_r = hidden_states + residual
+        cfg = self.config
+        self.step_count += 1
+
+        for ki in range(self.k):
+            d = self.directions[ki]
+            proj = (h_plus_r * d).sum(dim=-1, keepdim=True)
+            proj_clamped = proj.clamp(min=0)
+            proj_mag = proj_clamped.mean().item()
+            self.total_projections += 1
+
+            if proj_mag < cfg["proj_threshold"]:
+                continue
+
+            self.momentum.mul_(cfg["ema_decay"]).add_(
+                proj_mag * (1 - cfg["ema_decay"])
+            )
+
+            m = self.momentum.item()
+            sig_input = (m - cfg["sigmoid_center"]) * cfg["sigmoid_steepness"]
+            sig = 1.0 / (1.0 + _math.exp(-sig_input))
+
+            adaptive_scale = (
+                cfg["base_scale"] * self.layer_weight * sig * cfg["max_scale_mult"]
+            )
+
+            correction = adaptive_scale * proj_clamped * d
+            hidden_states = hidden_states - correction
+            self.total_steered += 1
+
+            if ki < self.k - 1:
+                h_plus_r = hidden_states + residual
+
+        return (hidden_states, residual)
+
+
 class Glm4MoeMLP(nn.Module):
     def __init__(
         self,
@@ -1129,6 +1242,7 @@ class Glm4MoeModel(nn.Module):
 
         # Clamped projective decode steering: pre-allocated buffers -> CUDA-graph safe.
         # v3: multi-layer decode with per-layer scales
+        # v4: momentum-adaptive scaling in eager mode (--disable-cuda-graph)
         _has_decode_steering = (
             forward_batch.forward_mode.is_decode()
             and getattr(self, '_steer_dec_scale', None) is not None
@@ -1137,6 +1251,30 @@ class Glm4MoeModel(nn.Module):
         _decode_peak_layer = getattr(self, '_decode_steer_peak_layer', -1)
         _decode_steered_set = getattr(self, '_decode_steered_set', frozenset())
         _has_multi_layer_decode = getattr(self, '_has_multi_layer_decode', False)
+        _v4_adaptive = getattr(self, '_v4_adaptive', False)
+
+        # v4: Reset momentum at prefill (new sequence start)
+        if _is_prefill and _v4_adaptive and hasattr(self, '_steer_momentum'):
+            self._steer_momentum.zero_()
+
+        # Per-request decode scale override (CUDA-graph safe: modifies buffer before layer loop)
+        _saved_dec_scale_for_override = None
+        _saved_dec_scales_for_override = None
+        _ds_override = getattr(forward_batch, 'steering_decode_scale_override', None)
+        if _has_decode_steering and _ds_override is not None:
+            if _has_multi_layer_decode:
+                # Scale proportionally: new_scale[i] = old_scale[i] * (override / global_default)
+                # Since _steer_dec_scales has global_scale baked in, rescale all layers
+                _old_global = self._steer_dec_scale.item()
+                if _old_global > 0:
+                    _ratio = float(_ds_override) / _old_global
+                    _saved_dec_scales_for_override = self._steer_dec_scales.clone()
+                    self._steer_dec_scales.mul_(_ratio)
+                _saved_dec_scale_for_override = _old_global
+                self._steer_dec_scale.fill_(float(_ds_override))
+            else:
+                _saved_dec_scale_for_override = self._steer_dec_scale.item()
+                self._steer_dec_scale.fill_(float(_ds_override))
 
         aux_hidden_states = []
         for i in range(normal_start_layer, normal_end_layer):
@@ -1185,12 +1323,37 @@ class Glm4MoeModel(nn.Module):
                             _p.copy_(_t2.sum(dim=-1, keepdim=True))
                             _p.clamp_(min=0)
                             torch.mul(_p, _dir_ki, out=_t2)
-                            _t2.mul_(_dec_scale_i)
+                            if _v4_adaptive:
+                                # DAS v4: momentum-adaptive scaling (CUDA-graph safe)
+                                # All ops are in-place on pre-allocated buffers.
+                                # 1. Mean projection → pre-allocated scalar
+                                torch.mean(_p, dim=0, out=self._v4_p_mean)
+                                # 2. EMA: momentum = decay*momentum + (1-decay)*mean
+                                self._steer_momentum.mul_(self._v4_ema_decay).add_(
+                                    self._v4_p_mean, alpha=self._v4_ema_complement)
+                                # 3. Sigmoid input: (momentum - center) * steepness → pre-alloc
+                                torch.sub(self._steer_momentum, self._v4_sig_center,
+                                          out=self._v4_sig_tmp)
+                                self._v4_sig_tmp.mul_(self._v4_sig_steep)
+                                # 4. Sigmoid → pre-alloc result
+                                torch.sigmoid(self._v4_sig_tmp, out=self._v4_sig_result)
+                                # 5. Apply: correction * base_scale * sigmoid * max_mult
+                                _t2.mul_(_dec_scale_i)
+                                _t2.mul_(self._v4_sig_result)
+                                _t2.mul_(self._v4_max_mult)
+                            else:
+                                _t2.mul_(_dec_scale_i)
                             hidden_states.sub_(_t2)
                             # Recompute h+residual for next direction (hidden_states changed)
                             if _ki < _steering_k - 1:
                                 torch.add(hidden_states, residual, out=_t1)
                 _maybe_capture(hidden_states, i, forward_batch, n_layers=len(self.layers), residual=residual)
+
+        # Restore decode scale after per-request override
+        if _saved_dec_scale_for_override is not None:
+            self._steer_dec_scale.fill_(_saved_dec_scale_for_override)
+        if _saved_dec_scales_for_override is not None:
+            self._steer_dec_scales.copy_(_saved_dec_scales_for_override)
 
         if normal_end_layer != self.end_layer:
             hidden_states, residual = model_forward_maybe_tbo(
@@ -1456,6 +1619,38 @@ class Glm4MoeForCausalLM(nn.Module):
             f"per_layer={'yes' if self.model._steering_per_layer else 'no'}, "
             f"decode_scale={decode_scale}"
         )
+
+        # --- DAS v4: Momentum-adaptive decode steering ---
+        # CUDA-graph safe: all ops are in-place on pre-allocated buffers.
+        # Momentum persists across decode steps (graph replays reuse same tensors).
+        # Reset happens at prefill (eager mode) or via cuda_graph_runner on toggle.
+        self.model._v4_adaptive = (decode_scale > 0.0)
+        if self.model._v4_adaptive:
+            # Scalar momentum: EMA of projection magnitude (persists between replays)
+            self.model.register_buffer('_steer_momentum',
+                torch.zeros(1, dtype=torch.float32))
+            # Intermediate buffers for CUDA-graph-safe sigmoid computation
+            self.model.register_buffer('_v4_sig_tmp',
+                torch.zeros(1, dtype=torch.float32))
+            self.model.register_buffer('_v4_sig_result',
+                torch.zeros(1, dtype=torch.float32))
+            # Pre-allocated buffer for mean projection (avoids temp tensor)
+            self.model.register_buffer('_v4_p_mean',
+                torch.zeros(1, dtype=torch.float32))
+            # EMA config as registered buffers (move to GPU with model)
+            self.model.register_buffer('_v4_ema_decay',
+                torch.tensor(0.85, dtype=torch.float32))
+            self.model._v4_ema_complement = 0.15  # Python float, compile-time constant
+            self.model.register_buffer('_v4_max_mult',
+                torch.tensor(2.5, dtype=torch.bfloat16))
+            self.model.register_buffer('_v4_sig_center',
+                torch.tensor(0.3, dtype=torch.float32))
+            self.model.register_buffer('_v4_sig_steep',
+                torch.tensor(4.0, dtype=torch.float32))
+            logger.info(
+                f"[steering] DAS v4 momentum-adaptive decode enabled "
+                f"(ema_decay=0.85, max_mult=2.5, CUDA-graph safe)"
+            )
 
     def determine_num_fused_shared_experts(self):
         if get_global_server_args().disable_shared_experts_fusion:

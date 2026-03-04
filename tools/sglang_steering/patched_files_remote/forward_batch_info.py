@@ -56,6 +56,8 @@ from sglang.srt.model_executor.forward_batch_deepseek_mha_mixin import (
 )
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import get_compiler_backend, is_hip, is_npu, support_triton
+import logging as _logging
+_steering_logger = _logging.getLogger("sglang.steering")
 from sglang.srt.utils.common import ceil_align
 
 if TYPE_CHECKING:
@@ -74,18 +76,20 @@ _is_npu = is_npu()
 class SteeringConfig:
     """Configuration for steering vector manipulation during inference.
 
-    Supports two modes:
-    - Single: uniform scale across specified layers
-    - Gaussian: weighted kernel centered on peak layer
+    DAS v1: Single global direction with Gaussian/single layer weighting.
+    DAS v2: Per-layer directions with separate attn/MLP scales and trapezoidal kernel.
 
     Formula: h' = h - effective_scale * (h . r_hat) * r_hat
     """
-    direction: torch.Tensor
+    direction: torch.Tensor  # [hidden_size] global direction (v1 compatible)
     scale: float = 1.0
     layers: Optional[List[int]] = None
     enabled: bool = True
-    # Per-layer weights (computed from Gaussian kernel). Overrides scale+layers.
+    # Per-layer weights (computed from Gaussian/trapezoidal kernel). Overrides scale+layers.
     layer_weights: Optional[Dict[int, float]] = None
+    # DAS v2: separate attn/MLP scales
+    attn_scale: float = 0.0
+    mlp_scale: float = 0.0
 
     def should_apply_to_layer(self, layer_idx: int) -> bool:
         """Check if steering should be applied to a specific layer."""
@@ -110,21 +114,22 @@ def apply_steering(
     layer_idx: int,
     residual: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Apply steering vector to hidden states using FULL REPRESENTATION.
+    """Apply steering vector to hidden states using projective subtraction.
 
-    CORRECCIÓN H3+H4:
-    - Proyección calculada sobre (h + residual): espacio donde se extrajo el vector.
-    - Corrección aplicada a hidden_states: se propaga al residual en la capa siguiente.
-    - Fórmula projective (no additive): h' = h - scale * (full · r̂) * r̂
+    Formula: h' = h - scale * (h · r̂) * r̂
+
+    Projection is computed on hidden_states (MLP delta), NOT h+residual.
+    Validated empirically: h+residual garbles harmless queries at scale >= 2.0.
+    For decode-time clamped steering (which DOES use h+residual), see glm4_moe.py.
 
     Args:
-        hidden_states: Output del MLP de la capa actual [num_tokens, hidden_size]
-        steering_config: Configuración del steering
-        layer_idx: Índice de la capa actual
-        residual: Stream acumulado [num_tokens, hidden_size] (puede ser None en capa 0)
+        hidden_states: Output of the current layer's MLP [num_tokens, hidden_size]
+        steering_config: Steering configuration
+        layer_idx: Current layer index
+        residual: Unused, kept for API compatibility
 
     Returns:
-        hidden_states modificado (residual no se toca aquí)
+        Modified hidden_states with refusal direction projected out
     """
     if steering_config is None:
         return hidden_states
@@ -139,39 +144,13 @@ def apply_steering(
     )
     direction = direction / direction.norm()
 
-    # CORRECCIÓN H3: usar representación completa (h + residual) para proyectar
-    # El vector fue extraído de este espacio, no del espacio de h o residual solos
-    if residual is not None:
-        full_repr = hidden_states + residual
-    else:
-        full_repr = hidden_states
-
-    # Proyección sobre la representación completa
-    proj_scalar = (full_repr * direction).sum(dim=-1, keepdim=True)
-
-    # DEBUG: log stats cada 50 capas
-    if layer_idx % 10 == 0:
-        import logging
-        logger = logging.getLogger("sglang.steering")
-        nt = hidden_states.shape[0]
-        proj_mean = proj_scalar.mean().item()
-        proj_std = proj_scalar.std().item()
-        proj_pos_frac = (proj_scalar > 0).float().mean().item()
-        effective_scale = steering_config.get_effective_scale(layer_idx)
-        logger.debug(
-            f"[steering L{layer_idx}] tokens={nt} proj_mean={proj_mean:.3f} "
-            f"proj_std={proj_std:.3f} pos_frac={proj_pos_frac:.2f} "
-            f"scale={effective_scale:.3f}"
-        )
+    # Projection on hidden_states (layer delta), NOT h+residual
+    proj_scalar = (hidden_states * direction).sum(dim=-1, keepdim=True)
 
     effective_scale = steering_config.get_effective_scale(layer_idx)
 
-    # PROJECTIVE: h' = h - scale * (full·r̂) * r̂
-    # La corrección se aplica a hidden_states para propagarse al residual en la
-    # siguiente capa via layer_communicator.prepare_attn(hidden_states, residual)
-    # PROJECTIVE (H3+H4 fix): h' = h - scale * (full.r0302) * r0302
-    # ADDITIVE (CAA) para Gaussiano multi-capa: sin resonancia
-    modified = hidden_states - effective_scale * direction
+    # PROJECTIVE: h' = h - scale * (h · r̂) * r̂
+    modified = hidden_states - effective_scale * proj_scalar * direction
 
     return modified
 
@@ -519,6 +498,11 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
     # Steering vector configuration for abliteration
     steering_config: Optional[SteeringConfig] = None
 
+    # Per-request steering toggle: True when steering_enabled=False in request
+    steering_disabled: bool = False
+    # Per-request decode scale override (None = use server default)
+    steering_decode_scale_override: float = None
+
     @classmethod
     def init_new(
         cls,
@@ -566,6 +550,17 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
         )
         device = model_runner.device
 
+        # Per-request steering toggle + decode scale override
+        if hasattr(batch, "reqs") and batch.reqs:
+            for req in batch.reqs:
+                se = getattr(req, "steering_enabled", None)
+                if se is False:
+                    ret.steering_disabled = True
+                # Per-request decode scale override (first non-None wins)
+                _ds = getattr(req, "steering_decode_scale", None)
+                if _ds is not None and ret.steering_decode_scale_override is None:
+                    ret.steering_decode_scale_override = float(_ds)
+
         # Copy steering config from model runner if available
         # Copy steering config from model runner, with per-request override
         base_config = getattr(model_runner, "steering_config", None)
@@ -579,7 +574,7 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
                         override_enabled = req.steering_enabled
                     if hasattr(req, "steering_scale") and req.steering_scale is not None:
                         override_scale = req.steering_scale
-            
+
             # Apply overrides if present
             if override_enabled is False:
                 ret.steering_config = None  # Disable steering for this batch

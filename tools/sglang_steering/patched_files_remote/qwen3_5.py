@@ -160,6 +160,119 @@ def _maybe_capture(hidden_states, layer_idx, forward_batch, n_layers=64, residua
         _CAPTURE_COUNTER[0] += 1
 
 
+def _maybe_capture_sublayer(hidden_states, layer_idx, stage, forward_batch, n_layers=64):
+    """Capture sub-layer hidden states (post_attn or post_mlp) for direction extraction.
+
+    When capture_config.json has sublayer_capture=true, captures the raw sub-layer
+    output (NOT full residual stream) at post_attn and post_mlp stages. This produces
+    directions that match the v2 sub-layer steering representation.
+
+    Keys in capture store: (layer_idx, stage) where stage is "post_attn" or "post_mlp"
+    """
+    cfg = _get_capture_config()
+    if cfg is None:
+        return
+    if not cfg.get("sublayer_capture", False):
+        return
+    if hidden_states.shape[0] <= 2:
+        return
+
+    try:
+        import torch.distributed as dist
+        if dist.is_initialized() and dist.get_rank() != 0:
+            return
+    except Exception:
+        pass
+
+    target_layers = cfg.get("layers", list(range(n_layers)))
+    if layer_idx not in target_layers:
+        return
+
+    # Capture last token's sub-layer output (NO residual added — raw δ)
+    last_h = hidden_states[-1, :].detach().cpu().to(torch.float32)
+    _CAPTURE_STORE[(layer_idx, stage)] = last_h
+
+
+# ============================================================
+# STEERING DIAGNOSTICS — per-layer projection tracking
+# ============================================================
+
+_STEERING_DIAG = {"enabled": False}
+
+
+def _diag_init(n_layers):
+    """Initialize diagnostic accumulators."""
+    _STEERING_DIAG.update({
+        "enabled": True,
+        "n_layers": n_layers,
+        "post_layer": {"proj_sum": [0.0] * n_layers, "neg_frac_sum": [0.0] * n_layers, "count": [0] * n_layers},
+        "prefill_attn": {"proj_sum": [0.0] * n_layers, "count": [0] * n_layers},
+        "prefill_mlp": {"proj_sum": [0.0] * n_layers, "count": [0] * n_layers},
+        "decode": {"proj_sum": [0.0] * n_layers, "count": [0] * n_layers},
+        "n_prefills": 0,
+        "n_decodes": 0,
+    })
+    logger.info("[steering-diag] Diagnostics ENABLED — tracking per-layer projections")
+
+
+def _diag_record_sublayer(stage, layer_id, projs, k):
+    """Record clamped projection magnitude from sub-layer steering."""
+    if not _STEERING_DIAG.get("enabled"):
+        return
+    d = _STEERING_DIAG[stage]
+    _mean = sum(p.mean().item() for p in projs) / max(k, 1)
+    d["proj_sum"][layer_id] += _mean
+    d["count"][layer_id] += 1
+
+
+def _diag_record_postlayer(layer_idx, hidden_states, residual, dirs, k):
+    """Record full-stream (h+residual) projection onto refusal directions."""
+    if not _STEERING_DIAG.get("enabled"):
+        return
+    _full = hidden_states + residual if residual is not None else hidden_states
+    _psum = 0.0
+    _neg = 0
+    _total = 0
+    for _ki in range(k):
+        _d = dirs[layer_idx][_ki]
+        _p = (_full * _d).sum(dim=-1)
+        _psum += _p.abs().mean().item()
+        _neg += (_p < 0).sum().item()
+        _total += _p.numel()
+    _STEERING_DIAG["post_layer"]["proj_sum"][layer_idx] += _psum / max(k, 1)
+    _STEERING_DIAG["post_layer"]["neg_frac_sum"][layer_idx] += _neg / max(_total, 1)
+    _STEERING_DIAG["post_layer"]["count"][layer_idx] += 1
+
+
+def _diag_dump():
+    """Dump accumulated diagnostics to /tmp/steering_diagnostics.json."""
+    d = _STEERING_DIAG
+    if not d.get("enabled"):
+        return
+    result = {
+        "n_prefills": d["n_prefills"],
+        "n_decodes": d["n_decodes"],
+        "layers": {},
+    }
+    for li in range(d["n_layers"]):
+        entry = {"layer_type": "full" if li % 4 == 3 else "linear"}
+        for stage in ["post_layer", "prefill_attn", "prefill_mlp", "decode"]:
+            c = d[stage]["count"][li]
+            if c > 0:
+                entry[f"{stage}_proj_mean"] = round(d[stage]["proj_sum"][li] / c, 6)
+                if stage == "post_layer":
+                    entry["post_layer_neg_frac"] = round(d[stage]["neg_frac_sum"][li] / c, 4)
+        result["layers"][str(li)] = entry
+    try:
+        with open("/tmp/steering_diagnostics.json", "w") as f:
+            _json.dump(result, f, indent=2)
+        logger.info(
+            f"[steering-diag] Dumped: {d['n_prefills']} prefills, {d['n_decodes']} decodes"
+        )
+    except Exception as e:
+        logger.warning(f"[steering-diag] Dump failed: {e}")
+
+
 class Qwen3_5GatedDeltaNet(nn.Module):
     def __init__(
         self,
@@ -434,6 +547,7 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
     ):
         forward_batch = kwargs.get("forward_batch", None)
         steering_ctx = kwargs.get("steering_ctx", None)
+        ablit_ctx = kwargs.get("ablit_ctx", None)
 
         hidden_states, residual = self.layer_communicator.prepare_attn(
             hidden_states, residual, forward_batch
@@ -445,24 +559,54 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
                 forward_batch,
             )
 
-        # DAS v2: post-attention steering (prefill only)
+        # Inline abliteration: remove d̂ from out_proj output
+        if ablit_ctx is not None:
+            _d = ablit_ctx["dir"]
+            if ablit_ctx["is_prefill"]:
+                _aproj = (hidden_states * _d).sum(dim=-1, keepdim=True)
+                hidden_states = hidden_states - _aproj * _d
+            else:
+                _bs = hidden_states.shape[0]
+                _atmp = ablit_ctx["tmp"][:_bs]
+                _ap = ablit_ctx["proj"][:_bs]
+                torch.mul(hidden_states, _d, out=_atmp)
+                _ap.copy_(_atmp.sum(dim=-1, keepdim=True))
+                torch.mul(_ap, _d, out=_atmp)
+                _atmp.mul_(ablit_ctx["mask"][:_bs])
+                hidden_states.sub_(_atmp)
+
+        # Sub-layer capture: post-attention (before steering, raw δ_attn)
+        _maybe_capture_sublayer(hidden_states, self.layer_id, "post_attn", forward_batch)
+
+        # DAS v2: post-attention steering (prefill only) — linear attn layer
         if steering_ctx is not None and steering_ctx.get("attn_active"):
             _layer_id = self.layer_id
             if _layer_id in steering_ctx["attn_set"]:
-                _dirs_k = steering_ctx["dirs"][_layer_id]
+                _dirs_k = steering_ctx.get("attn_dirs", steering_ctx["dirs"])[_layer_id]
                 _s = steering_ctx["attn_scales"][_layer_id]
                 _k = steering_ctx["k"]
                 _additive = steering_ctx.get("additive", False)
-                for _ki in range(_k):
-                    _dir = _dirs_k[_ki]
-                    if _additive:
+                if _additive:
+                    for _ki in range(_k):
+                        _dir = _dirs_k[_ki]
                         _lc = steering_ctx["layer_coeffs"]
                         _c = _lc[_layer_id] if _lc is not None else 1.0
                         hidden_states = hidden_states + _s * _c * _dir
-                    else:
+                else:
+                    _projs = []
+                    for _ki in range(_k):
+                        _dir = _dirs_k[_ki]
                         _proj = (hidden_states * _dir).sum(dim=-1, keepdim=True)
                         _proj.clamp_(min=0)
-                        hidden_states = hidden_states - _s * _proj * _dir
+                        _projs.append(_proj)
+                    _sv_w = steering_ctx.get("sv_weights")
+                    for _ki in range(_k):
+                        _dir = _dirs_k[_ki]
+                        _correction = _s * _projs[_ki] * _dir
+                        if _sv_w is not None:
+                            _correction = _correction * _sv_w[_layer_id][_ki]
+                        hidden_states = hidden_states - _correction
+                    _diag_record_sublayer("prefill_attn", _layer_id, _projs, _k)
 
         # Fully Connected
         hidden_states, residual = self.layer_communicator.prepare_mlp(
@@ -474,24 +618,54 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
         )
         hidden_states = self.mlp(hidden_states, forward_batch, use_reduce_scatter)
 
-        # DAS v2: post-MLP steering (prefill only)
+        # Inline abliteration: remove d̂ from down_proj output
+        if ablit_ctx is not None:
+            _d = ablit_ctx["dir"]
+            if ablit_ctx["is_prefill"]:
+                _aproj = (hidden_states * _d).sum(dim=-1, keepdim=True)
+                hidden_states = hidden_states - _aproj * _d
+            else:
+                _bs = hidden_states.shape[0]
+                _atmp = ablit_ctx["tmp"][:_bs]
+                _ap = ablit_ctx["proj"][:_bs]
+                torch.mul(hidden_states, _d, out=_atmp)
+                _ap.copy_(_atmp.sum(dim=-1, keepdim=True))
+                torch.mul(_ap, _d, out=_atmp)
+                _atmp.mul_(ablit_ctx["mask"][:_bs])
+                hidden_states.sub_(_atmp)
+
+        # Sub-layer capture: post-MLP (before steering, raw δ_mlp)
+        _maybe_capture_sublayer(hidden_states, self.layer_id, "post_mlp", forward_batch)
+
+        # DAS v2: post-MLP steering (prefill only) — linear attn layer
         if steering_ctx is not None and steering_ctx.get("mlp_active"):
             _layer_id = self.layer_id
             if _layer_id in steering_ctx["mlp_set"]:
-                _dirs_k = steering_ctx["dirs"][_layer_id]
+                _dirs_k = steering_ctx.get("mlp_dirs", steering_ctx["dirs"])[_layer_id]
                 _s = steering_ctx["mlp_scales"][_layer_id]
                 _k = steering_ctx["k"]
                 _additive = steering_ctx.get("additive", False)
-                for _ki in range(_k):
-                    _dir = _dirs_k[_ki]
-                    if _additive:
+                if _additive:
+                    for _ki in range(_k):
+                        _dir = _dirs_k[_ki]
                         _lc = steering_ctx["layer_coeffs"]
                         _c = _lc[_layer_id] if _lc is not None else 1.0
                         hidden_states = hidden_states + _s * _c * _dir
-                    else:
+                else:
+                    _projs = []
+                    for _ki in range(_k):
+                        _dir = _dirs_k[_ki]
                         _proj = (hidden_states * _dir).sum(dim=-1, keepdim=True)
                         _proj.clamp_(min=0)
-                        hidden_states = hidden_states - _s * _proj * _dir
+                        _projs.append(_proj)
+                    _sv_w = steering_ctx.get("sv_weights")
+                    for _ki in range(_k):
+                        _dir = _dirs_k[_ki]
+                        _correction = _s * _projs[_ki] * _dir
+                        if _sv_w is not None:
+                            _correction = _correction * _sv_w[_layer_id][_ki]
+                        hidden_states = hidden_states - _correction
+                    _diag_record_sublayer("prefill_mlp", _layer_id, _projs, _k)
 
         hidden_states, residual = self.layer_communicator.postprocess_layer(
             hidden_states, residual, forward_batch
@@ -701,6 +875,7 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
         **kwargs,
     ):
         steering_ctx = kwargs.get("steering_ctx", None)
+        ablit_ctx = kwargs.get("ablit_ctx", None)
 
         hidden_states, residual = self.layer_communicator.prepare_attn(
             hidden_states, residual, forward_batch
@@ -713,24 +888,54 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
                 forward_batch=forward_batch,
             )
 
-        # DAS v2: post-attention steering (prefill only)
+        # Inline abliteration: remove d̂ from o_proj output
+        if ablit_ctx is not None:
+            _d = ablit_ctx["dir"]
+            if ablit_ctx["is_prefill"]:
+                _aproj = (hidden_states * _d).sum(dim=-1, keepdim=True)
+                hidden_states = hidden_states - _aproj * _d
+            else:
+                _bs = hidden_states.shape[0]
+                _atmp = ablit_ctx["tmp"][:_bs]
+                _ap = ablit_ctx["proj"][:_bs]
+                torch.mul(hidden_states, _d, out=_atmp)
+                _ap.copy_(_atmp.sum(dim=-1, keepdim=True))
+                torch.mul(_ap, _d, out=_atmp)
+                _atmp.mul_(ablit_ctx["mask"][:_bs])
+                hidden_states.sub_(_atmp)
+
+        # Sub-layer capture: post-attention (before steering, raw δ_attn)
+        _maybe_capture_sublayer(hidden_states, self.layer_id, "post_attn", forward_batch)
+
+        # DAS v2: post-attention steering (prefill only) — full attn layer
         if steering_ctx is not None and steering_ctx.get("attn_active"):
             _layer_id = self.layer_id
             if _layer_id in steering_ctx["attn_set"]:
-                _dirs_k = steering_ctx["dirs"][_layer_id]
+                _dirs_k = steering_ctx.get("attn_dirs", steering_ctx["dirs"])[_layer_id]
                 _s = steering_ctx["attn_scales"][_layer_id]
                 _k = steering_ctx["k"]
                 _additive = steering_ctx.get("additive", False)
-                for _ki in range(_k):
-                    _dir = _dirs_k[_ki]
-                    if _additive:
+                if _additive:
+                    for _ki in range(_k):
+                        _dir = _dirs_k[_ki]
                         _lc = steering_ctx["layer_coeffs"]
                         _c = _lc[_layer_id] if _lc is not None else 1.0
                         hidden_states = hidden_states + _s * _c * _dir
-                    else:
+                else:
+                    _projs = []
+                    for _ki in range(_k):
+                        _dir = _dirs_k[_ki]
                         _proj = (hidden_states * _dir).sum(dim=-1, keepdim=True)
                         _proj.clamp_(min=0)
-                        hidden_states = hidden_states - _s * _proj * _dir
+                        _projs.append(_proj)
+                    _sv_w = steering_ctx.get("sv_weights")
+                    for _ki in range(_k):
+                        _dir = _dirs_k[_ki]
+                        _correction = _s * _projs[_ki] * _dir
+                        if _sv_w is not None:
+                            _correction = _correction * _sv_w[_layer_id][_ki]
+                        hidden_states = hidden_states - _correction
+                    _diag_record_sublayer("prefill_attn", _layer_id, _projs, _k)
 
         # Fully Connected
         hidden_states, residual = self.layer_communicator.prepare_mlp(
@@ -741,24 +946,54 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
         )
         hidden_states = self.mlp(hidden_states, forward_batch, use_reduce_scatter)
 
-        # DAS v2: post-MLP steering (prefill only)
+        # Inline abliteration: remove d̂ from down_proj output
+        if ablit_ctx is not None:
+            _d = ablit_ctx["dir"]
+            if ablit_ctx["is_prefill"]:
+                _aproj = (hidden_states * _d).sum(dim=-1, keepdim=True)
+                hidden_states = hidden_states - _aproj * _d
+            else:
+                _bs = hidden_states.shape[0]
+                _atmp = ablit_ctx["tmp"][:_bs]
+                _ap = ablit_ctx["proj"][:_bs]
+                torch.mul(hidden_states, _d, out=_atmp)
+                _ap.copy_(_atmp.sum(dim=-1, keepdim=True))
+                torch.mul(_ap, _d, out=_atmp)
+                _atmp.mul_(ablit_ctx["mask"][:_bs])
+                hidden_states.sub_(_atmp)
+
+        # Sub-layer capture: post-MLP (before steering, raw δ_mlp)
+        _maybe_capture_sublayer(hidden_states, self.layer_id, "post_mlp", forward_batch)
+
+        # DAS v2: post-MLP steering (prefill only) — full attn layer
         if steering_ctx is not None and steering_ctx.get("mlp_active"):
             _layer_id = self.layer_id
             if _layer_id in steering_ctx["mlp_set"]:
-                _dirs_k = steering_ctx["dirs"][_layer_id]
+                _dirs_k = steering_ctx.get("mlp_dirs", steering_ctx["dirs"])[_layer_id]
                 _s = steering_ctx["mlp_scales"][_layer_id]
                 _k = steering_ctx["k"]
                 _additive = steering_ctx.get("additive", False)
-                for _ki in range(_k):
-                    _dir = _dirs_k[_ki]
-                    if _additive:
+                if _additive:
+                    for _ki in range(_k):
+                        _dir = _dirs_k[_ki]
                         _lc = steering_ctx["layer_coeffs"]
                         _c = _lc[_layer_id] if _lc is not None else 1.0
                         hidden_states = hidden_states + _s * _c * _dir
-                    else:
+                else:
+                    _projs = []
+                    for _ki in range(_k):
+                        _dir = _dirs_k[_ki]
                         _proj = (hidden_states * _dir).sum(dim=-1, keepdim=True)
                         _proj.clamp_(min=0)
-                        hidden_states = hidden_states - _s * _proj * _dir
+                        _projs.append(_proj)
+                    _sv_w = steering_ctx.get("sv_weights")
+                    for _ki in range(_k):
+                        _dir = _dirs_k[_ki]
+                        _correction = _s * _projs[_ki] * _dir
+                        if _sv_w is not None:
+                            _correction = _correction * _sv_w[_layer_id][_ki]
+                        hidden_states = hidden_states - _correction
+                    _diag_record_sublayer("prefill_mlp", _layer_id, _projs, _k)
 
         hidden_states, residual = self.layer_communicator.postprocess_layer(
             hidden_states, residual, forward_batch
@@ -881,21 +1116,27 @@ class Qwen3_5ForCausalLM(nn.Module):
             and not _steering_off
         )
         _steered_layers = getattr(self, "_steered_layer_set", None)
+        _prefill_fullresidual = getattr(self, "_steering_prefill_fullresidual", False)
         _steering_ctx = None
         if _steering_v2:
             _attn_set = getattr(self, "_attn_steered_layer_set", frozenset())
             _mlp_set = getattr(self, "_mlp_steered_layer_set", frozenset())
+            # DAS v10: use sub-layer-specific directions when available
+            _has_sublayer = getattr(self, "_has_sublayer_dirs", False)
             _steering_ctx = {
                 "dirs": self._steering_dirs,
+                "attn_dirs": self._steering_attn_dirs if _has_sublayer else self._steering_dirs,
+                "mlp_dirs": self._steering_mlp_dirs if _has_sublayer else self._steering_dirs,
                 "attn_scales": self._steering_attn_scales,
                 "mlp_scales": self._steering_mlp_scales,
                 "attn_set": _attn_set,
                 "mlp_set": _mlp_set,
-                "attn_active": len(_attn_set) > 0,
-                "mlp_active": len(_mlp_set) > 0,
+                "attn_active": len(_attn_set) > 0 and not _prefill_fullresidual,
+                "mlp_active": len(_mlp_set) > 0 and not _prefill_fullresidual,
                 "k": _steering_k,
                 "additive": getattr(self, "_steering_additive", False),
                 "layer_coeffs": getattr(self, "_steering_layer_coeffs", None),
+                "sv_weights": getattr(self, "_steering_sv_weights", None),
             }
 
         # Clamped projective decode steering (CUDA-graph safe)
@@ -930,6 +1171,20 @@ class Qwen3_5ForCausalLM(nn.Module):
                 _saved_dec_scale_for_override = self._steer_dec_scale.item()
                 self._steer_dec_scale.fill_(float(_ds_override))
 
+        # --- Inline abliteration context ---
+        _abliteration = (
+            getattr(self, "_abliteration_enabled", False) and not _steering_off
+        )
+        _ablit_ctx = None
+        if _abliteration:
+            _ablit_ctx = {
+                "dir": self._ablit_dir,
+                "tmp": self._ablit_tmp,
+                "proj": self._ablit_proj,
+                "mask": self._steering_mask,
+                "is_prefill": _is_prefill,
+            }
+
         # Pass through decoder layers
         for layer_idx in range(len(self.layers)):
             layer = self.layers[layer_idx]
@@ -942,7 +1197,28 @@ class Qwen3_5ForCausalLM(nn.Module):
                     residual=residual,
                     forward_batch=forward_batch,
                     steering_ctx=_steering_ctx,
+                    ablit_ctx=_ablit_ctx,
                 )
+
+            # DAS v8: Post-layer full-residual steering (prefill only)
+            if (
+                _steering_v2
+                and _prefill_fullresidual
+                and _is_prefill
+                and layer_idx in getattr(self, "_fullres_steered_layer_set", frozenset())
+            ):
+                _s8 = self._steering_fullres_scales[layer_idx]
+                _dirs_layer = self._steering_dirs[layer_idx]
+                _sv_w = getattr(self, "_steering_sv_weights", None)
+                _full = hidden_states + residual  # full accumulated state = what extraction used
+                for _ki in range(_steering_k):
+                    _dir = _dirs_layer[_ki]
+                    _proj = (_full * _dir).sum(dim=-1, keepdim=True)
+                    _proj.clamp_(min=0)
+                    _correction = _s8 * _proj * _dir
+                    if _sv_w is not None:
+                        _correction = _correction * _sv_w[layer_idx][_ki]
+                    residual = residual - _correction
 
             # POST-LAYER steering (prefill-only, v1 compatible)
             if (
@@ -998,33 +1274,82 @@ class Qwen3_5ForCausalLM(nn.Module):
                             torch.mul(_p, _dir_ki, out=_t2)       # [bs,1] * [hid] -> [bs,hid]
                             hidden_states.add_(_t2)
                     else:
-                        # PROJECTIVE: clamped projective decode (v4 momentum-adaptive)
+                        # PROJECTIVE: clamped projective decode (v4/v5 momentum-adaptive)
+                        # All ops in-place on pre-allocated buffers -> CUDA-graph safe
                         torch.add(hidden_states, residual, out=_t1)
-                        for _ki in range(_steering_k):
-                            _dir_ki = self._steering_dirs[layer_idx][_ki]
-                            torch.mul(_t1, _dir_ki, out=_t2)
-                            _p.copy_(_t2.sum(dim=-1, keepdim=True))
-                            _p.clamp_(min=0)
-                            if _v4_adaptive:
-                                # DAS v4: per-request momentum-adaptive (CUDA-graph safe)
-                                _mom = self._steer_momentum[:_bs]
-                                _mom.mul_(self._v4_ema_decay).add_(_p, alpha=0.15)
-                                _stmp = self._v4_sig_tmp[:_bs]
-                                torch.sub(_mom, self._v4_sig_center, out=_stmp)
-                                _stmp.mul_(self._v4_sig_steep)
-                                _sres = self._v4_sig_result[:_bs]
-                                torch.sigmoid(_stmp, out=_sres)
-                                torch.mul(_p, _dir_ki, out=_t2)
-                                _t2.mul_(_dec_scale_i)
-                                _t2.mul_(_sres)
-                                _t2.mul_(self._v4_max_mult)
-                                _t2.mul_(self._steering_mask[:_bs])
+
+                        if _v4_adaptive:
+                            # DAS v5: compute projections for ALL k directions
+                            _v5p = self._v5_proj[:_bs]  # [bs, k]
+                            for _ki in range(_steering_k):
+                                _dir_ki = self._steering_dirs[layer_idx][_ki]
+                                torch.mul(_t1, _dir_ki, out=_t2)
+                                _v5p[:, _ki:_ki+1].copy_(
+                                    _t2.sum(dim=-1, keepdim=True)
+                                )
+                            _v5p.clamp_(min=0)
+
+                            # Per-vector per-request momentum EMA
+                            _mom = self._steer_momentum[:_bs]  # [bs, k]
+                            _mom.mul_(self._v4_ema_decay).add_(
+                                _v5p.float(), alpha=0.15
+                            )
+
+                            # Adaptive scaling (sigmoid / linear / none)
+                            _center = self._v5_depth_centers[layer_idx]
+                            _stmp = self._v4_sig_tmp[:_bs]  # [bs, k]
+                            _sres = self._v4_sig_result[:_bs]  # [bs, k]
+                            _sig_mode = getattr(self, "_steering_sig_mode", "sigmoid")
+
+                            if _sig_mode == "linear":
+                                # Linear ramp: scale = clamp(momentum / center, 0, 1)
+                                # Eliminates binary cliff — proportional steering
+                                torch.div(_mom, _center + 1e-6, out=_stmp)
+                                _stmp.clamp_(min=0.0, max=1.0)
+                                _sres.copy_(_stmp)
+                            elif _sig_mode == "none":
+                                # No adaptive scaling — fixed multiplier
+                                _sres.fill_(1.0)
                             else:
+                                # Default sigmoid (v5 behavior)
+                                torch.sub(_mom, _center, out=_stmp)
+                                _stmp.mul_(self._v4_sig_steep)
+                                torch.sigmoid(_stmp, out=_sres)
+
+                            # Apply per-vector corrections sequentially
+                            _sv_w = getattr(self, "_steering_sv_weights", None)
+                            for _ki in range(_steering_k):
+                                _dir_ki = self._steering_dirs[layer_idx][_ki]
+                                _p_ki = _v5p[:, _ki:_ki+1]  # [bs, 1]
+                                _sig_ki = _sres[:, _ki:_ki+1].bfloat16()
+                                torch.mul(_p_ki, _dir_ki, out=_t2)
+                                _t2.mul_(_dec_scale_i)
+                                _t2.mul_(_sig_ki)
+                                _t2.mul_(self._v4_max_mult)
+                                # SV weighting: scale each direction by its relative importance
+                                if _sv_w is not None:
+                                    _t2.mul_(_sv_w[layer_idx][_ki])
+                                _t2.mul_(self._steering_mask[:_bs])
+                                hidden_states.sub_(_t2)
+                        else:
+                            # Non-adaptive projective (fixed scale)
+                            for _ki in range(_steering_k):
+                                _dir_ki = self._steering_dirs[layer_idx][_ki]
+                                torch.mul(_t1, _dir_ki, out=_t2)
+                                _p.copy_(_t2.sum(dim=-1, keepdim=True))
+                                _p.clamp_(min=0)
                                 torch.mul(_p, _dir_ki, out=_t2)
                                 _t2.mul_(_dec_scale_i)
-                            hidden_states.sub_(_t2)
-                            if _ki < _steering_k - 1:
-                                torch.add(hidden_states, residual, out=_t1)
+                                hidden_states.sub_(_t2)
+                                if _ki < _steering_k - 1:
+                                    torch.add(hidden_states, residual, out=_t1)
+
+            # DIAGNOSTIC: post-layer full-stream projection
+            if _STEERING_DIAG.get("enabled") and _is_prefill:
+                _diag_record_postlayer(
+                    layer_idx, hidden_states, residual,
+                    self._steering_dirs, _steering_k,
+                )
 
             _maybe_capture(
                 hidden_states,
@@ -1044,6 +1369,12 @@ class Qwen3_5ForCausalLM(nn.Module):
                 hidden_states.add_(
                     input_deepstack_embeds[:, sep : sep + self.hidden_size]
                 )
+
+        # DIAGNOSTIC: dump periodically (prefill only — decode uses CUDA graphs, no .item())
+        if _STEERING_DIAG.get("enabled") and _is_prefill:
+            _STEERING_DIAG["n_prefills"] += 1
+            if _STEERING_DIAG["n_prefills"] % 20 == 0:
+                _diag_dump()
 
         # Restore decode scale after per-request override
         if _saved_dec_scale_for_override is not None:
@@ -1359,7 +1690,9 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
         text_config = getattr(self.config, "text_config", self.config)
         n_layers = text_config.num_hidden_layers
         hid = text_config.hidden_size
-        n_dirs = int(getattr(args, "steering_n_directions", 1))
+        # DAS v5: k_directions takes priority; fall back to n_directions
+        n_dirs = int(getattr(args, "steering_k_directions",
+                    getattr(args, "steering_n_directions", 1)))
 
         # Mark that steering buffers need device migration on first forward
         self.model._steering_needs_device_sync = True
@@ -1420,6 +1753,39 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
         self.model._steering_k = k
         self.model.register_buffer("_steering_dirs", per_layer_vecs.bfloat16())
 
+        # --- DAS v10: Load sub-layer-specific direction files ---
+        # When attn-specific and MLP-specific direction files are provided,
+        # use them instead of the shared _steering_dirs for sub-layer steering.
+        # This ensures the extraction representation matches the serving representation.
+        _attn_per_layer_path = getattr(args, "steering_attn_per_layer_path", None)
+        _mlp_per_layer_path = getattr(args, "steering_mlp_per_layer_path", None)
+        self.model._has_sublayer_dirs = False
+
+        if _attn_per_layer_path and _mlp_per_layer_path:
+            def _load_sublayer_dirs(path, label):
+                vecs = torch.load(path, map_location="cpu", weights_only=True)
+                if vecs.dim() == 2:
+                    vecs = vecs.unsqueeze(1)
+                assert vecs.shape[0] == n_layers, (
+                    f"{label} directions must have {n_layers} layers, got {vecs.shape[0]}"
+                )
+                _k_sub = min(n_dirs, vecs.shape[1])
+                vecs = vecs[:, :_k_sub, :]
+                norms = vecs.norm(dim=2, keepdim=True).clamp(min=1e-8)
+                vecs = vecs / norms
+                logger.info(f"[steering] Loaded {label} sub-layer directions: {vecs.shape}")
+                return vecs
+
+            attn_vecs = _load_sublayer_dirs(_attn_per_layer_path, "attn")
+            mlp_vecs = _load_sublayer_dirs(_mlp_per_layer_path, "MLP")
+            self.model.register_buffer("_steering_attn_dirs", attn_vecs.bfloat16())
+            self.model.register_buffer("_steering_mlp_dirs", mlp_vecs.bfloat16())
+            self.model._has_sublayer_dirs = True
+            logger.info(
+                f"[steering] DAS v10 sub-layer directions enabled: "
+                f"attn={attn_vecs.shape}, mlp={mlp_vecs.shape}"
+            )
+
         # Global direction for v1 decode steering compatibility
         steering_layers_str = getattr(args, "steering_layers", None)
         center_layers = (
@@ -1438,7 +1804,16 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
         attn_scale = float(getattr(args, "steering_attn_scale", 0.0))
         mlp_scale = float(getattr(args, "steering_mlp_scale", 0.0))
 
-        self.model._steering_v2 = attn_scale > 0.0 or mlp_scale > 0.0
+        # DAS v5: hybrid attention kernel differentiation
+        attn_scale_full = float(getattr(args, "steering_attn_scale_full", 0.0))
+        attn_scale_linear = float(getattr(args, "steering_attn_scale_linear", 0.0))
+        mlp_scale_full = float(getattr(args, "steering_mlp_scale_full", 0.0))
+        mlp_scale_linear = float(getattr(args, "steering_mlp_scale_linear", 0.0))
+        _v5_hybrid = attn_scale_full > 0.0 or attn_scale_linear > 0.0
+
+        self.model._steering_v2 = (
+            attn_scale > 0.0 or mlp_scale > 0.0 or _v5_hybrid
+        )
 
         layer_weights = torch.zeros(n_layers, dtype=torch.float32)
 
@@ -1468,8 +1843,27 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
             )
 
         scales = layer_weights * base_scale
-        attn_scales = layer_weights * attn_scale
-        mlp_scales = layer_weights * mlp_scale
+
+        # DAS v5: differentiated scales for full-attn vs linear-attn layers
+        if _v5_hybrid:
+            FULL_ATTN_LAYERS = set(range(3, n_layers, 4))
+            attn_scales = torch.zeros(n_layers, dtype=torch.float32)
+            mlp_scales = torch.zeros(n_layers, dtype=torch.float32)
+            for i in range(n_layers):
+                if i in FULL_ATTN_LAYERS:
+                    attn_scales[i] = layer_weights[i] * attn_scale_full
+                    mlp_scales[i] = layer_weights[i] * mlp_scale_full
+                else:
+                    attn_scales[i] = layer_weights[i] * attn_scale_linear
+                    mlp_scales[i] = layer_weights[i] * mlp_scale_linear
+            logger.info(
+                f"[steering] DAS v5 hybrid kernel: "
+                f"full_attn={attn_scale_full}/{mlp_scale_full}, "
+                f"linear_attn={attn_scale_linear}/{mlp_scale_linear}"
+            )
+        else:
+            attn_scales = layer_weights * attn_scale
+            mlp_scales = layer_weights * mlp_scale
 
         self.model.register_buffer("_steering_scales", scales.bfloat16())
         self.model.register_buffer("_steering_attn_scales", attn_scales.bfloat16())
@@ -1495,7 +1889,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
         decode_scale = float(getattr(args, "steering_decode_scale", 0.0))
         self.model._decode_steer_peak_layer = peak_layer
         if decode_scale > 0.0:
-            max_bs = getattr(args, "cuda_graph_max_bs", 128)
+            max_bs = max(getattr(args, "cuda_graph_max_bs", 128), 512)  # 512 min for warmup batches
             self.model.register_buffer(
                 "_steer_dec_tmp1", torch.zeros(max_bs, hid, dtype=torch.bfloat16)
             )
@@ -1555,24 +1949,36 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
             f"decode_scale={decode_scale}"
         )
 
-        # --- DAS v4: Momentum-adaptive decode steering ---
+        # --- DAS v4/v5: Momentum-adaptive decode steering ---
         self.model._v4_adaptive = decode_scale > 0.0
         if self.model._v4_adaptive:
-            max_bs = getattr(args, "cuda_graph_max_bs", 128)
-            # Per-request buffers [max_bs, 1]
+            max_bs = max(getattr(args, "cuda_graph_max_bs", 128), 512)  # 512 min for warmup batches
+            # DAS v5: per-vector per-request buffers [max_bs, k]
+            # Falls back to [max_bs, 1] when k=1 (v4 compat)
             self.model.register_buffer(
-                "_steer_momentum", torch.zeros(max_bs, 1, dtype=torch.float32)
+                "_steer_momentum", torch.zeros(max_bs, k, dtype=torch.float32)
             )
             self.model.register_buffer(
-                "_v4_sig_tmp", torch.zeros(max_bs, 1, dtype=torch.float32)
+                "_v4_sig_tmp", torch.zeros(max_bs, k, dtype=torch.float32)
             )
             self.model.register_buffer(
-                "_v4_sig_result", torch.zeros(max_bs, 1, dtype=torch.float32)
+                "_v4_sig_result", torch.zeros(max_bs, k, dtype=torch.float32)
             )
-            # Per-request steering mask (1.0=ON, 0.0=OFF)
+            # DAS v5: per-vector projection buffer [max_bs, k]
+            self.model.register_buffer(
+                "_v5_proj", torch.zeros(max_bs, k, dtype=torch.bfloat16)
+            )
+            # Per-request steering mask (1.0=ON, 0.0=OFF) [max_bs, 1]
             self.model.register_buffer(
                 "_steering_mask", torch.ones(max_bs, 1, dtype=torch.bfloat16)
             )
+            # DAS v5: depth-adaptive sigmoid centers [n_layers]
+            # Lower threshold for early layers (intervene sooner), higher for late
+            depth_centers = torch.tensor(
+                [0.2 + 0.2 * (l / n_layers) for l in range(n_layers)],
+                dtype=torch.float32,
+            )
+            self.model.register_buffer("_v5_depth_centers", depth_centers)
             # EMA config as registered buffers
             self.model.register_buffer(
                 "_v4_ema_decay", torch.tensor(0.85, dtype=torch.float32)
@@ -1581,15 +1987,20 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
             self.model.register_buffer(
                 "_v4_max_mult", torch.tensor(2.5, dtype=torch.bfloat16)
             )
+            # DAS v6: configurable sigmoid steepness and mode
+            _sig_steepness = float(getattr(args, "steering_sig_steepness", 4.0))
             self.model.register_buffer(
-                "_v4_sig_center", torch.tensor(0.3, dtype=torch.float32)
+                "_v4_sig_steep", torch.tensor(_sig_steepness, dtype=torch.float32)
             )
-            self.model.register_buffer(
-                "_v4_sig_steep", torch.tensor(4.0, dtype=torch.float32)
-            )
+            _sig_mode = getattr(args, "steering_sig_mode", "sigmoid")
+            self.model._steering_sig_mode = _sig_mode
+            _v5_mode = k > 1
             logger.info(
-                f"[steering] DAS v4 momentum-adaptive decode enabled "
-                f"(ema_decay=0.85, max_mult=2.5, per-request isolation, "
+                f"[steering] DAS {'v6' if _sig_mode != 'sigmoid' else ('v5' if _v5_mode else 'v4')} "
+                f"momentum-adaptive decode enabled (k={k}, ema_decay=0.85, max_mult=2.5, "
+                f"sig_mode={_sig_mode}, sig_steep={_sig_steepness}, "
+                f"per-{'vector ' if _v5_mode else ''}request isolation, "
+                f"depth-adaptive centers=[{depth_centers[0]:.2f}..{depth_centers[-1]:.2f}], "
                 f"CUDA-graph safe)"
             )
 
@@ -1612,10 +2023,78 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
         else:
             self.model._steering_layer_coeffs = None
 
+        # Load per-direction SV weights (for DAS v6 proportional weighting)
+        sv_weights_path = getattr(args, "steering_sv_weights_path", None)
+        if sv_weights_path:
+            sv_weights = torch.load(sv_weights_path, map_location="cpu", weights_only=True)
+            assert sv_weights.shape[0] == n_layers, (
+                f"SV weights shape {sv_weights.shape} does not match n_layers={n_layers}"
+            )
+            self.model.register_buffer("_steering_sv_weights", sv_weights.bfloat16())
+            logger.info(
+                f"[steering] Loaded SV weights: shape={sv_weights.shape}, "
+                f"range=[{sv_weights.min():.3f}, {sv_weights.max():.3f}]"
+            )
+        else:
+            self.model._steering_sv_weights = None
+
         logger.info(
             f"[steering] Intervention mode: {intervention_mode}"
             + (f", layer_coeffs={layer_coeffs_path}" if layer_coeffs_path else "")
+            + (f", sv_weights={sv_weights_path}" if sv_weights_path else "")
         )
+
+        # --- DAS v8: fullresidual prefill steering mode ---
+        prefill_mode = getattr(args, "steering_prefill_mode", "sublayer")
+        self.model._steering_prefill_fullresidual = (prefill_mode == "fullresidual")
+        if prefill_mode == "fullresidual":
+            # For fullresidual, use max(attn, mlp) as single-intervention scale per layer
+            fullres_scales = torch.zeros(n_layers, dtype=torch.float32)
+            for i in range(n_layers):
+                fullres_scales[i] = max(attn_scales[i].item(), mlp_scales[i].item())
+            self.model.register_buffer("_steering_fullres_scales", fullres_scales.bfloat16())
+            _fullres_set = frozenset(int(i) for i in range(n_layers) if fullres_scales[i].item() > 1e-6)
+            self.model._fullres_steered_layer_set = _fullres_set
+            logger.info(f"[steering] DAS v8 fullresidual prefill mode: {len(_fullres_set)} active layers")
+
+        # --- Steering diagnostics ---
+        if getattr(args, "steering_diagnostics", False):
+            _diag_init(n_layers)
+
+        # --- Inline Abliteration (weight-equivalent, on-demand) ---
+        ablit_path = getattr(args, "abliteration_vector_path", None)
+        self.model._abliteration_enabled = False
+        if ablit_path:
+            ablit_dir = torch.load(ablit_path, map_location="cpu", weights_only=True)
+            if ablit_dir.dim() != 1:
+                raise ValueError(
+                    f"Abliteration vector must be 1-D, got shape {ablit_dir.shape}"
+                )
+            ablit_dir = ablit_dir.float()
+            ablit_dir = ablit_dir / ablit_dir.norm()
+            self.model.register_buffer("_ablit_dir", ablit_dir.bfloat16())
+
+            # Scratch buffers for CUDA-graph-safe decode abliteration
+            max_bs = max(getattr(args, "cuda_graph_max_bs", 128), 512)
+            self.model.register_buffer(
+                "_ablit_tmp", torch.zeros(max_bs, hid, dtype=torch.bfloat16)
+            )
+            self.model.register_buffer(
+                "_ablit_proj", torch.zeros(max_bs, 1, dtype=torch.bfloat16)
+            )
+            # Ensure per-request mask exists (reuse steering mask if already created)
+            if not hasattr(self.model, "_steering_mask") or self.model._steering_mask is None:
+                self.model.register_buffer(
+                    "_steering_mask", torch.ones(max_bs, 1, dtype=torch.bfloat16)
+                )
+
+            self.model._abliteration_enabled = True
+            self.model._steering_needs_device_sync = True
+            logger.info(
+                f"[abliteration] Inline abliteration enabled: "
+                f"dir shape={list(ablit_dir.shape)}, max_bs={max_bs}, "
+                f"CUDA-graph safe, per-request toggle via steering_enabled"
+            )
 
     def get_embed_and_head(self):
         return self.model.embed_tokens.weight, self.lm_head.weight

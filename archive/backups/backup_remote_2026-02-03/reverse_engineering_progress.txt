@@ -1,0 +1,20 @@
+======================================================================
+INGENIERÍA INVERSA DE ABLITERACIÓN
+Base: zai-org/GLM-4.7-Flash
+Abliterated: huihui-ai/Huihui-GLM-4.7-Flash-abliterated
+Timestamp: 2026-02-03T09:00:11.643598
+======================================================================
+
+======================================================================
+COMPARANDO PESOS (STREAMING)
+======================================================================
+======================================================================
+CARGANDO PESOS DE AMBOS MODELOS
+======================================================================
+
+Obteniendo archivos de zai-org/GLM-4.7-Flash...
+Obteniendo archivos de huihui-ai/Huihui-GLM-4.7-Flash-abliterated...
+  Base: 48 archivos safetensors
+  Abliterated: 48 archivos safetensors
+Analizando shards:   0%|          | 0/48 [00:00<?, ?it/s]Analizando shards:   2%|▏         | 1/48 [01:55<1:30:16, 115.24s/it]Analizando shards:   4%|▍         | 2/48 [11:50<5:04:54, 397.71s/it]Analizando shards:   6%|▋         | 3/48 [12:32<2:56:27, 235.27s/it]Analizando shards:   8%|▊         | 4/48 [13:07<1:54:25, 156.03s/it]Analizando shards:  10%|█         | 5/48 [21:34<3:22:31, 282.60s/it]Analizando shards:  12%|█▎        | 6/48 [22:09<2:18:52, 198.40s/it]Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Analizando shards:  15%|█▍        | 7/48 [22:43<1:38:59, 144.87s/it]Analizando shards:  17%|█▋        | 8/48 [23:18<1:13:06, 109.66s/it]Analizando shards:  19%|█▉        | 9/48 [23:53<56:05, 86.29s/it]   Analizando shards:  21%|██        | 10/48 [30:56<2:00:34, 190.37s/it]

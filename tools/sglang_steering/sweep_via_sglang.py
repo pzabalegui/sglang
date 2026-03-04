@@ -13,6 +13,7 @@ Usage:
     python sweep_via_sglang.py [--url http://localhost:8000]
 """
 
+import argparse
 import gc
 import glob
 import io
@@ -30,20 +31,48 @@ import requests
 import torch
 import torch.nn.functional as F
 
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Sweep refusal direction across layers using SGLang activation capture"
+    )
+    parser.add_argument("--url", default=os.environ.get("SGLANG_URL", "http://localhost:8000"),
+                        help="SGLang server URL (default: $SGLANG_URL or http://localhost:8000)")
+    parser.add_argument("--hidden-size", type=int, default=5120,
+                        help="Model hidden size (default: 5120 for GLM-4.7)")
+    parser.add_argument("--n-layers", type=int, default=92,
+                        help="Total number of model layers (default: 92 for GLM-4.7)")
+    parser.add_argument("--sweep-start", type=int, default=30,
+                        help="First layer to sweep (default: 30)")
+    parser.add_argument("--sweep-end", type=int, default=62,
+                        help="Last layer to sweep (default: 62)")
+    parser.add_argument("--sweep-step", type=int, default=2,
+                        help="Layer sweep step size (default: 2)")
+    parser.add_argument("--n-train", type=int, default=64,
+                        help="Number of training samples per class (default: 64)")
+    parser.add_argument("--n-test", type=int, default=16,
+                        help="Number of test samples per class (default: 16)")
+    parser.add_argument("--output-dir", default="/tmp/fp8_vector_extraction",
+                        help="Output directory for results (default: /tmp/fp8_vector_extraction)")
+    parser.add_argument("--capture-dir", default="/tmp/captures",
+                        help="Directory for captured activations (default: /tmp/captures)")
+    return parser.parse_args()
+
+
 # ============================================================
-# Configuration
+# Configuration (set from CLI args in main())
 # ============================================================
-SGLANG_URL = os.environ.get("SGLANG_URL", "http://localhost:8000")
-OUTPUT_DIR = "/tmp/fp8_vector_extraction"
-CAPTURE_DIR = "/tmp/captures"
+SGLANG_URL = None
+OUTPUT_DIR = None
+CAPTURE_DIR = None
 CAPTURE_CONFIG = "/tmp/capture_config.json"
-SWEEP_START = 30
-SWEEP_END = 62
-SWEEP_STEP = 2
-N_TRAIN = 64
-N_TEST = 16
-HIDDEN_SIZE = 5120
-N_LAYERS = 92
+SWEEP_START = None
+SWEEP_END = None
+SWEEP_STEP = None
+N_TRAIN = None
+N_TEST = None
+HIDDEN_SIZE = None
+N_LAYERS = None
 
 # ============================================================
 # Refusal patterns
@@ -318,6 +347,21 @@ def compute_layer_quality_from_acts(
 # Main
 # ============================================================
 def main():
+    global SGLANG_URL, OUTPUT_DIR, CAPTURE_DIR, SWEEP_START, SWEEP_END, SWEEP_STEP
+    global N_TRAIN, N_TEST, HIDDEN_SIZE, N_LAYERS
+
+    args = parse_args()
+    SGLANG_URL = args.url
+    OUTPUT_DIR = args.output_dir
+    CAPTURE_DIR = args.capture_dir
+    SWEEP_START = args.sweep_start
+    SWEEP_END = args.sweep_end
+    SWEEP_STEP = args.sweep_step
+    N_TRAIN = args.n_train
+    N_TEST = args.n_test
+    HIDDEN_SIZE = args.hidden_size
+    N_LAYERS = args.n_layers
+
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 

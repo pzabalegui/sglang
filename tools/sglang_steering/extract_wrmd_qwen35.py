@@ -19,16 +19,21 @@ Per-layer scaling coefficients (quantile-normalized):
 References:
     - "Refusal Steering" (arXiv 2512.16602)
 
-Outputs:
+Outputs (k=1, default backward compat):
     /tmp/wrmd_direction_qwen35_L{BEST}.pt            -- shape [5120]
     /tmp/wrmd_direction_qwen35_LBEST.pt               -- copy for launch script
     /tmp/wrmd_directions_per_layer_64layers.pt         -- shape [64, 1, 5120]
     /tmp/wrmd_scaling_coeffs_64layers.pt               -- shape [64]
     /tmp/wrmd_results_qwen35.json                      -- full metrics + layer selection
 
+Outputs (k>1, DAS v5 multi-vector):
+    /tmp/wrmd_directions_per_layer_64layers.pt         -- shape [64, k, 5120]
+    /tmp/wrmd_scaling_coeffs_64layers.pt               -- shape [64, k]
+
 Usage:
     python3 extract_wrmd_qwen35.py [--n-harmful 500] [--n-harmless 500]
     python3 extract_wrmd_qwen35.py --lambda-reg 0.01 --model-path /tmp/Qwen3.5-27B-FP8
+    python3 extract_wrmd_qwen35.py --k-directions 4   # DAS v5 multi-vector extraction
 """
 
 import argparse
@@ -232,11 +237,14 @@ def extract_hidden_states(model, tokenizer, prompts, device, max_len=256):
     return [torch.stack(states) for states in all_states]
 
 
-def compute_wrmd_direction(harmful_states, harmless_states, lambda_reg=1e-2):
+def compute_wrmd_direction(harmful_states, harmless_states, lambda_reg=-1):
     """Compute WRMD direction: ridge-regularized inverse of harmless covariance.
 
     v = (Sigma_safe + lambda * I)^{-1} @ (mean_harm - mean_safe)
     v = v / ||v||
+
+    Args:
+        lambda_reg: Ridge regularization. If < 0, uses adaptive: 0.1 * trace(Sigma)/d
 
     Memory: Sigma = [hidden, hidden] float32 = 100MB for hidden=5120.
     """
@@ -244,10 +252,179 @@ def compute_wrmd_direction(harmful_states, harmless_states, lambda_reg=1e-2):
     centered = harmless_states - harmless_states.mean(0)             # [N, hidden]
     hidden_size = centered.shape[1]
     Sigma = (centered.T @ centered) / (centered.shape[0] - 1)       # [hidden, hidden]
+    if lambda_reg < 0:
+        trace_est = Sigma.diagonal().sum().item()
+        lambda_reg = 0.1 * trace_est / hidden_size
     Sigma_reg = Sigma + lambda_reg * torch.eye(hidden_size)
     v_tilde = torch.linalg.solve(Sigma_reg, delta)                  # [hidden]
     v = v_tilde / v_tilde.norm()
     return v
+
+
+def compute_wrmd_multivector(harmful_states, harmless_states, k=4, lambda_reg=-1):
+    """Compute k orthogonal WRMD directions via SVD of whitened contrast matrix.
+
+    When n_samples < hidden_size (underdetermined case), uses PCA projection
+    to work in the data subspace where the covariance is full-rank.
+
+    Algorithm (PCA-projected for n < d):
+        1. SVD of centered harmless data -> top-r PCA components (r = n-1)
+        2. Project all data to r-dimensional subspace
+        3. Compute WRMD in subspace (r×r covariance is full-rank)
+        4. Project directions back to full d-dimensional space
+
+    Args:
+        lambda_reg: Ridge regularization. If < 0, uses adaptive: 0.1 * trace(Sigma)/rank
+
+    Returns:
+        directions: [k, hidden] orthogonal WRMD directions
+        singular_values: [k] SVD singular values (variance explained)
+        sv_weights: [k] relative SV weights (S_k / S_k[0]), in [0, 1]
+    """
+    hidden_size = harmful_states.shape[1]
+    n_safe = harmless_states.shape[0]
+    mu_harm = harmful_states.mean(0)
+    mu_safe = harmless_states.mean(0)
+
+    # Centered harmless data
+    centered = harmless_states - mu_safe
+
+    if n_safe < hidden_size:
+        # PCA-projected WRMD: work in data subspace for numerical stability
+        rank = min(n_safe - 1, hidden_size)
+        print(f"    PCA-projected WRMD (n={n_safe} < d={hidden_size}): rank={rank}")
+
+        # SVD of centered data to get PCA basis
+        _, S_pca, Vt_pca = torch.linalg.svd(centered, full_matrices=False)
+        V_proj = Vt_pca[:rank]  # [rank, hidden] - projection basis
+
+        # Project to subspace
+        harm_proj = harmful_states @ V_proj.T  # [n_harm, rank]
+        safe_proj = harmless_states @ V_proj.T  # [n_safe, rank]
+        mu_harm_r = harm_proj.mean(0)
+        mu_safe_r = safe_proj.mean(0)
+
+        # Covariance in subspace (rank × rank, full-rank)
+        centered_r = safe_proj - mu_safe_r
+        Sigma_r = (centered_r.T @ centered_r) / (n_safe - 1)
+
+        # Adaptive regularization: proportional to average eigenvalue
+        if lambda_reg < 0:
+            trace_est = Sigma_r.diagonal().sum().item()
+            lambda_reg = 0.1 * trace_est / rank
+            print(f"    Adaptive lambda: trace={trace_est:.1f}, rank={rank}, lambda={lambda_reg:.4f}")
+
+        Sigma_r_reg = Sigma_r + lambda_reg * torch.eye(rank, device=Sigma_r.device)
+
+        # Cholesky whitening in subspace (always works with modest lambda)
+        L_r = torch.linalg.cholesky(Sigma_r_reg)
+        W_r = torch.linalg.inv(L_r)
+
+        # Whitened contrast in subspace
+        contrast_r = (harm_proj - mu_safe_r).T  # [rank, n_harm]
+        C_w = W_r @ contrast_r
+
+        # SVD for top-k directions in whitened subspace
+        U_r, S_svd, _ = torch.linalg.svd(C_w, full_matrices=False)
+        effective_k = min(k, U_r.shape[1])
+        U_k = U_r[:, :effective_k]
+        S_k = S_svd[:effective_k]
+
+        # De-whiten in subspace, then project back to full space
+        dirs_r = W_r.T @ U_k  # [rank, k]
+        dirs = V_proj.T @ dirs_r  # [hidden, k]
+    else:
+        # Standard full-rank WRMD
+        Sigma = (centered.T @ centered) / (n_safe - 1)
+
+        # Adaptive regularization
+        if lambda_reg < 0:
+            trace_est = Sigma.diagonal().sum().item()
+            lambda_reg = 0.1 * trace_est / hidden_size
+            print(f"    Adaptive lambda: trace={trace_est:.1f}, d={hidden_size}, lambda={lambda_reg:.4f}")
+
+        Sigma_reg = Sigma + lambda_reg * torch.eye(hidden_size, device=Sigma.device)
+
+        L = torch.linalg.cholesky(Sigma_reg)
+        W = torch.linalg.inv(L)
+
+        contrast = (harmful_states - mu_safe).T
+        C_w = W @ contrast
+
+        U, S_svd, _ = torch.linalg.svd(C_w, full_matrices=False)
+        effective_k = min(k, U.shape[1])
+        U_k = U[:, :effective_k]
+        S_k = S_svd[:effective_k]
+
+        dirs = W.T @ U_k
+
+    # Normalize each direction
+    for i in range(effective_k):
+        norm = dirs[:, i].norm()
+        if norm > 1e-8:
+            dirs[:, i] /= norm
+
+    # Sign convention: harmful projects positively
+    for i in range(effective_k):
+        d = dirs[:, i]
+        harm_proj_val = (harmful_states @ d).mean()
+        safe_proj_val = (harmless_states @ d).mean()
+        if harm_proj_val < safe_proj_val:
+            dirs[:, i] = -d
+
+    # Pad with zeros if fewer valid directions than k
+    if effective_k < k:
+        pad = torch.zeros(hidden_size, k - effective_k, device=dirs.device)
+        dirs = torch.cat([dirs, pad], dim=1)
+        S_k = torch.cat([S_k, torch.zeros(k - effective_k, device=S_k.device)])
+
+    # Compute relative SV weights (no truncation — let steering code handle weighting)
+    sv_weights = S_k / (S_k[0] + 1e-10)  # [k], first direction = 1.0
+    print(f"    SV weights: {[f'{w:.3f}' for w in sv_weights.tolist()]}")
+
+    return dirs.T.contiguous(), S_k, sv_weights  # [k, hidden], [k], [k]
+
+
+def compute_scaling_coeffs_multivector(per_layer_dirs, all_harm_states, all_safe_states,
+                                       center_layer, k):
+    """Compute per-layer per-direction scaling coefficients via quantile normalization.
+
+    s[l, ki] = Q_0.95(|proj_l_ki|) / Q_0.95(|proj_center_ki|)
+
+    Returns: [n_layers, k] tensor of scaling coefficients.
+    """
+    n_layers = len(per_layer_dirs)
+    coeffs = torch.zeros(n_layers, k, dtype=torch.float32)
+
+    for ki in range(k):
+        # Center layer reference for this direction
+        center_dir = per_layer_dirs[center_layer][ki]  # [hidden]
+        if center_dir.norm() < 1e-8:
+            # Degenerate direction, uniform coefficients
+            coeffs[:, ki] = 1.0
+            continue
+
+        center_states = torch.cat([all_harm_states[center_layer],
+                                   all_safe_states[center_layer]])
+        center_projs = (center_states @ center_dir).abs()
+        q95_center = torch.quantile(center_projs, 0.95)
+
+        if q95_center.abs() < 1e-8:
+            coeffs[:, ki] = 1.0
+            continue
+
+        for layer_idx in range(n_layers):
+            layer_dir = per_layer_dirs[layer_idx][ki]  # [hidden]
+            if layer_dir.norm() < 1e-8:
+                coeffs[layer_idx, ki] = 0.0
+                continue
+            layer_states = torch.cat([all_harm_states[layer_idx],
+                                      all_safe_states[layer_idx]])
+            projs = (layer_states @ layer_dir).abs()
+            q95 = torch.quantile(projs, 0.95)
+            coeffs[layer_idx, ki] = q95 / q95_center
+
+    return coeffs
 
 
 def compute_md_direction(harmful_states, harmless_states):
@@ -349,19 +526,30 @@ def main():
                         help="Number of harmful prompts (default: 500, loads from AdvBench)")
     parser.add_argument("--n-harmless", type=int, default=500,
                         help="Number of harmless prompts (default: 500, loads from Alpaca)")
-    parser.add_argument("--lambda-reg", type=float, default=1e-2,
-                        help="Ridge regularization lambda (default: 0.01)")
+    parser.add_argument("--lambda-reg", type=float, default=-1,
+                        help="Ridge regularization lambda (-1 = adaptive: 0.1 * trace/rank)")
+    parser.add_argument("--k-directions", type=int, default=1,
+                        help="Number of orthogonal WRMD directions per layer "
+                             "(default: 1 for backward compat, use 4 for DAS v5)")
     parser.add_argument("--output-dir", default="/tmp")
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--save-activations", action="store_true",
+                        help="Save raw activations for diagnostic_scatter.py")
+    parser.add_argument("--diagnostic-plots", action="store_true",
+                        help="Generate 2D scatter diagnostic plots after extraction")
+    parser.add_argument("--diagnostic-layers", default="best,20,32,42,50",
+                        help="Layers for diagnostic plots (default: best,20,32,42,50)")
     args = parser.parse_args()
 
     device = args.device
     lambda_reg = args.lambda_reg
+    k_dirs = args.k_directions
 
     print(f"=== Qwen3.5 WRMD Refusal Direction Extraction ===")
     print(f"Model: {args.model_path}")
     print(f"Requested prompts: {args.n_harmful} harmful + {args.n_harmless} harmless")
     print(f"Ridge lambda: {lambda_reg}")
+    print(f"Directions per layer (k): {k_dirs}")
     print(f"Device: {device}")
 
     # Load prompts
@@ -414,39 +602,66 @@ def main():
     print("\nModel freed from GPU.")
 
     # Compute per-layer WRMD directions and quality metrics
-    print(f"\nComputing WRMD directions for {n_layers} layers (lambda={lambda_reg})...")
+    print(f"\nComputing WRMD directions for {n_layers} layers "
+          f"(lambda={lambda_reg}, k={k_dirs})...")
     print(f"  Sigma matrix: [{hidden_size}, {hidden_size}] float32 = "
           f"{hidden_size * hidden_size * 4 / 1e6:.0f}MB per layer")
 
-    per_layer_directions = []
-    per_layer_md_directions = []
+    per_layer_directions = []     # each: [k, hidden]
+    per_layer_md_directions = []  # each: [1, hidden]
+    per_layer_sv_weights = []     # each: [k] relative SV weights
     layer_results = []
     FULL_ATTN_LAYERS = set(range(3, n_layers, 4))  # every 4th starting from 3
 
     for layer_idx in range(n_layers):
         t_layer = time.time()
 
-        # WRMD direction
-        wrmd_dir = compute_wrmd_direction(
-            harmful_states[layer_idx], harmless_states[layer_idx], lambda_reg
-        )
-        wrmd_metrics = evaluate_direction(
-            wrmd_dir, harmful_states[layer_idx], harmless_states[layer_idx]
-        )
+        harm_l = harmful_states[layer_idx]
+        safe_l = harmless_states[layer_idx]
 
-        # Standard MD direction for comparison
-        md_dir, md_sv = compute_md_direction(
-            harmful_states[layer_idx], harmless_states[layer_idx]
-        )
-        md_metrics = evaluate_direction(
-            md_dir, harmful_states[layer_idx], harmless_states[layer_idx]
-        )
+        if k_dirs > 1:
+            # DAS v5/v6: multi-vector WRMD via whitened SVD
+            wrmd_dirs, sv_k, sv_w = compute_wrmd_multivector(
+                harm_l, safe_l, k=k_dirs, lambda_reg=lambda_reg
+            )
+            # Primary direction metrics (v0)
+            wrmd_metrics = evaluate_direction(wrmd_dirs[0], harm_l, safe_l)
+            # Per-direction metrics
+            per_dir_metrics = []
+            for ki in range(k_dirs):
+                if wrmd_dirs[ki].norm() > 1e-8:
+                    per_dir_metrics.append(
+                        evaluate_direction(wrmd_dirs[ki], harm_l, safe_l)
+                    )
+                else:
+                    per_dir_metrics.append({"cohens_d": 0.0, "accuracy": 0.5})
+            # Orthogonality check
+            max_cross = 0.0
+            for i in range(k_dirs):
+                for j in range(i + 1, k_dirs):
+                    cross = abs((wrmd_dirs[i] @ wrmd_dirs[j]).item())
+                    max_cross = max(max_cross, cross)
+            per_layer_sv_weights.append(sv_w)
+        else:
+            # k=1: backward compatible single WRMD
+            wrmd_dir_single = compute_wrmd_direction(harm_l, safe_l, lambda_reg)
+            wrmd_dirs = wrmd_dir_single.unsqueeze(0)  # [1, hidden]
+            wrmd_metrics = evaluate_direction(wrmd_dir_single, harm_l, safe_l)
+            per_dir_metrics = [wrmd_metrics]
+            sv_k = torch.tensor([0.0])
+            sv_w = torch.tensor([1.0])
+            max_cross = 0.0
+            per_layer_sv_weights.append(sv_w)
+
+        # Standard MD direction for comparison (always single)
+        md_dir, md_sv = compute_md_direction(harm_l, safe_l)
+        md_metrics = evaluate_direction(md_dir, harm_l, safe_l)
 
         result = {
             "layer": layer_idx,
             "attention_type": "full" if layer_idx in FULL_ATTN_LAYERS else "linear",
             "depth_pct": round(layer_idx / n_layers * 100, 1),
-            # WRMD metrics
+            # Primary WRMD direction metrics (v0)
             "cohens_d": wrmd_metrics["cohens_d"],
             "accuracy": wrmd_metrics["accuracy"],
             "harm_mean": wrmd_metrics["harm_mean"],
@@ -461,8 +676,15 @@ def main():
             # WRMD improvement
             "d_improvement": wrmd_metrics["cohens_d"] - md_metrics["cohens_d"],
         }
+        if k_dirs > 1:
+            result["k_directions"] = k_dirs
+            result["singular_values"] = [float(s) for s in sv_k]
+            result["max_cross_correlation"] = float(max_cross)
+            result["per_direction_d"] = [
+                float(m["cohens_d"]) for m in per_dir_metrics
+            ]
 
-        per_layer_directions.append(wrmd_dir.unsqueeze(0))  # [1, hidden]
+        per_layer_directions.append(wrmd_dirs)  # [k, hidden]
         per_layer_md_directions.append(md_dir.unsqueeze(0))
         layer_results.append(result)
 
@@ -470,15 +692,18 @@ def main():
         if layer_idx % 8 == 0 or layer_idx == n_layers - 1:
             attn_type = "FULL" if layer_idx in FULL_ATTN_LAYERS else "lin "
             improvement = result["d_improvement"]
+            extra = ""
+            if k_dirs > 1:
+                d_str = ",".join(f"{m['cohens_d']:+.1f}" for m in per_dir_metrics)
+                extra = f" k=[{d_str}] xcorr={max_cross:.3f}"
             print(f"  L{layer_idx:02d} [{attn_type}] "
                   f"WRMD d={wrmd_metrics['cohens_d']:+.2f} "
                   f"MD d={md_metrics['cohens_d']:+.2f} "
                   f"(+{improvement:.2f}) "
                   f"acc={wrmd_metrics['accuracy']:.3f} "
-                  f"[{dt:.1f}s]")
+                  f"[{dt:.1f}s]{extra}")
 
         # Explicit cleanup of Sigma matrix
-        del wrmd_dir, md_dir
         gc.collect()
 
     # Select best layer
@@ -491,15 +716,25 @@ def main():
           f"type={best_result['attention_type']}) ===")
 
     # Compute per-layer scaling coefficients
-    print(f"\nComputing per-layer scaling coefficients (center=L{best_layer})...")
-    scaling_coeffs = compute_scaling_coeffs(
-        per_layer_directions, harmful_states, harmless_states, best_layer
-    )
-    print(f"  Scaling range: [{scaling_coeffs.min():.3f}, {scaling_coeffs.max():.3f}]")
-    print(f"  Mean: {scaling_coeffs.mean():.3f}, Std: {scaling_coeffs.std():.3f}")
+    print(f"\nComputing per-layer scaling coefficients (center=L{best_layer}, k={k_dirs})...")
+    if k_dirs > 1:
+        scaling_coeffs = compute_scaling_coeffs_multivector(
+            per_layer_directions, harmful_states, harmless_states, best_layer, k_dirs
+        )
+        print(f"  Scaling shape: {scaling_coeffs.shape}")
+        print(f"  Range per direction:")
+        for ki in range(k_dirs):
+            c = scaling_coeffs[:, ki]
+            print(f"    v{ki}: [{c.min():.3f}, {c.max():.3f}] mean={c.mean():.3f}")
+    else:
+        scaling_coeffs = compute_scaling_coeffs(
+            per_layer_directions, harmful_states, harmless_states, best_layer
+        )
+        print(f"  Scaling range: [{scaling_coeffs.min():.3f}, {scaling_coeffs.max():.3f}]")
+        print(f"  Mean: {scaling_coeffs.mean():.3f}, Std: {scaling_coeffs.std():.3f}")
 
-    # Save global direction (best layer)
-    global_dir = per_layer_directions[best_layer].squeeze(0)  # [hidden]
+    # Save global direction (best layer, primary direction)
+    global_dir = per_layer_directions[best_layer][0]  # [hidden] (primary direction)
     global_path = os.path.join(args.output_dir, f"wrmd_direction_qwen35_L{best_layer}.pt")
     torch.save(global_dir, global_path)
     print(f"\nSaved global WRMD direction: {global_path} shape={global_dir.shape}")
@@ -509,25 +744,37 @@ def main():
     torch.save(global_dir, lbest_path)
     print(f"Saved LBEST copy: {lbest_path}")
 
-    # Save per-layer directions [n_layers, 1, hidden]
-    per_layer_tensor = torch.stack(per_layer_directions)  # [64, 1, 5120]
+    # Save per-layer directions [n_layers, k, hidden]
+    per_layer_tensor = torch.stack(per_layer_directions)  # [64, k, 5120]
     per_layer_path = os.path.join(
         args.output_dir, f"wrmd_directions_per_layer_{n_layers}layers.pt"
     )
     torch.save(per_layer_tensor, per_layer_path)
     print(f"Saved per-layer WRMD directions: {per_layer_path} shape={per_layer_tensor.shape}")
 
-    # Save scaling coefficients
+    # Save scaling coefficients [n_layers] or [n_layers, k]
     coeffs_path = os.path.join(
         args.output_dir, f"wrmd_scaling_coeffs_{n_layers}layers.pt"
     )
     torch.save(scaling_coeffs, coeffs_path)
     print(f"Saved scaling coefficients: {coeffs_path} shape={scaling_coeffs.shape}")
 
+    # Save per-direction SV weights [n_layers, k] for DAS v6 proportional weighting
+    sv_weights_tensor = torch.stack(per_layer_sv_weights)  # [n_layers, k]
+    sv_weights_path = os.path.join(
+        args.output_dir, f"wrmd_sv_weights_{n_layers}layers.pt"
+    )
+    torch.save(sv_weights_tensor, sv_weights_path)
+    print(f"Saved SV weights: {sv_weights_path} shape={sv_weights_tensor.shape}")
+    print(f"  SV weight stats: min={sv_weights_tensor.min():.3f}, "
+          f"max={sv_weights_tensor.max():.3f}, "
+          f"mean={sv_weights_tensor.mean():.3f}")
+
     # Save full results
     results_path = os.path.join(args.output_dir, "wrmd_results_qwen35.json")
     results_data = {
         "method": "WRMD",
+        "k_directions": k_dirs,
         "lambda_reg": lambda_reg,
         "n_harmful": n_harmful,
         "n_harmless": n_harmless,
@@ -537,9 +784,7 @@ def main():
         "best_wrmd_cohens_d": best_result["cohens_d"],
         "best_md_cohens_d": best_result["md_cohens_d"],
         "best_accuracy": best_result["accuracy"],
-        "scaling_coeffs_min": float(scaling_coeffs.min()),
-        "scaling_coeffs_max": float(scaling_coeffs.max()),
-        "scaling_coeffs_mean": float(scaling_coeffs.mean()),
+        "scaling_coeffs_shape": list(scaling_coeffs.shape),
         "layers": layer_results,
     }
     with open(results_path, "w") as f:
@@ -583,7 +828,148 @@ def main():
     # Print scaling coefficients summary
     print("\n=== Scaling Coefficients (sampled) ===")
     for l in range(0, n_layers, 8):
-        print(f"  L{l:02d}: s={scaling_coeffs[l]:.3f}")
+        if scaling_coeffs.dim() == 1:
+            print(f"  L{l:02d}: s={scaling_coeffs[l].item():.3f}")
+        else:
+            vals = [f"{scaling_coeffs[l, ki].item():.3f}" for ki in range(scaling_coeffs.shape[1])]
+            print(f"  L{l:02d}: s=[{', '.join(vals)}]")
+
+    # ── Diagnostic scatter plots ────────────────────────────────────────────
+    if args.diagnostic_plots:
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+
+            print("\n=== Generating diagnostic scatter plots ===")
+
+            # Parse target layers
+            diag_layers = []
+            for tok in args.diagnostic_layers.split(","):
+                tok = tok.strip()
+                if tok == "best":
+                    diag_layers.append(best_layer)
+                else:
+                    diag_layers.append(int(tok))
+            diag_layers = [l for l in diag_layers if 0 <= l < n_layers]
+            # Remove duplicates preserving order
+            seen = set()
+            diag_layers = [l for l in diag_layers if not (l in seen or seen.add(l))]
+
+            plot_dir = os.path.join(args.output_dir, "diagnostic_plots")
+            os.makedirs(plot_dir, exist_ok=True)
+
+            for layer_idx in diag_layers:
+                harm_l = harmful_states[layer_idx]   # [n_harmful, hidden]
+                safe_l = harmless_states[layer_idx]   # [n_harmless, hidden]
+
+                # Axis 1: WRMD primary direction
+                d0 = per_layer_directions[layer_idx][0].clone()  # [hidden]
+                d0 = d0 / (d0.norm() + 1e-10)
+
+                # Axis 2: best orthogonal direction
+                if k_dirs > 1 and per_layer_directions[layer_idx][1].norm() > 1e-8:
+                    # Use second WRMD direction (already orthogonal from SVD)
+                    d1 = per_layer_directions[layer_idx][1].clone()
+                    d1 = d1 / (d1.norm() + 1e-10)
+                    ortho_label = "WRMD d₁"
+                else:
+                    # Gram-Schmidt: orthogonal component of mean-difference w.r.t. d0
+                    md = harm_l.mean(0) - safe_l.mean(0)  # [hidden]
+                    md_orth = md - (md @ d0) * d0
+                    d1 = md_orth / (md_orth.norm() + 1e-10)
+                    ortho_label = "MD⊥d₀"
+
+                # Project all samples onto (d0, d1)
+                harm_x = (harm_l @ d0).numpy()
+                harm_y = (harm_l @ d1).numpy()
+                safe_x = (safe_l @ d0).numpy()
+                safe_y = (safe_l @ d1).numpy()
+
+                attn_type = "FULL" if layer_idx in FULL_ATTN_LAYERS else "linear"
+                depth_pct = round(layer_idx / n_layers * 100, 1)
+                lr = layer_results[layer_idx]
+                cohens_d = lr["cohens_d"]
+                accuracy = lr["accuracy"]
+
+                fig, ax = plt.subplots(figsize=(8, 6))
+                ax.scatter(safe_x, safe_y, c="#2196F3", alpha=0.4, s=12,
+                           label=f"Harmless (n={len(safe_x)})", zorder=2)
+                ax.scatter(harm_x, harm_y, c="#F44336", alpha=0.4, s=12,
+                           label=f"Harmful (n={len(harm_x)})", zorder=2)
+
+                # Mark class means
+                ax.scatter([safe_x.mean()], [safe_y.mean()], c="#0D47A1", marker="X",
+                           s=120, edgecolors="white", linewidths=1.2, zorder=3,
+                           label="Harmless mean")
+                ax.scatter([harm_x.mean()], [harm_y.mean()], c="#B71C1C", marker="X",
+                           s=120, edgecolors="white", linewidths=1.2, zorder=3,
+                           label="Harmful mean")
+
+                # Decision boundary (midpoint on WRMD axis)
+                threshold_x = (harm_x.mean() + safe_x.mean()) / 2
+                ax.axvline(threshold_x, color="gray", linestyle="--", alpha=0.5,
+                           label=f"Threshold={threshold_x:.2f}")
+
+                ax.set_xlabel("Projection onto WRMD d₀ (refusal direction)", fontsize=11)
+                ax.set_ylabel(f"Projection onto {ortho_label}", fontsize=11)
+                ax.set_title(
+                    f"Layer {layer_idx} ({attn_type}, {depth_pct}% depth)\n"
+                    f"Cohen's d={cohens_d:+.2f}  Acc={accuracy:.3f}  "
+                    f"Sep={lr['separation']:.2f}",
+                    fontsize=12,
+                )
+                ax.legend(fontsize=9, loc="upper left")
+                ax.grid(True, alpha=0.2)
+
+                fname = os.path.join(plot_dir, f"scatter_L{layer_idx:02d}.png")
+                fig.tight_layout()
+                fig.savefig(fname, dpi=150)
+                plt.close(fig)
+                print(f"  Saved {fname}")
+
+            # Multi-layer overview: cohens_d by layer with attention type coloring
+            fig, ax = plt.subplots(figsize=(12, 4))
+            layers_x = [r["layer"] for r in layer_results]
+            layers_d = [r["cohens_d"] for r in layer_results]
+            colors = ["#E91E63" if r["attention_type"] == "full" else "#3F51B5"
+                       for r in layer_results]
+            ax.bar(layers_x, layers_d, color=colors, width=0.8, alpha=0.7)
+            # Mark best layer
+            ax.axvline(best_layer, color="green", linestyle="--", linewidth=2,
+                       label=f"Best: L{best_layer}")
+            ax.set_xlabel("Layer index", fontsize=11)
+            ax.set_ylabel("Cohen's d (WRMD)", fontsize=11)
+            ax.set_title("Per-Layer Refusal Separation (WRMD)", fontsize=12)
+            # Legend for attention types
+            from matplotlib.lines import Line2D
+            from matplotlib.patches import Patch
+            ax.legend(handles=[
+                Patch(facecolor="#E91E63", alpha=0.7, label="Full attention"),
+                Patch(facecolor="#3F51B5", alpha=0.7, label="Linear attention"),
+                Line2D([0], [0], color="green", linestyle="--", linewidth=2,
+                       label=f"Best: L{best_layer}"),
+            ], fontsize=9)
+            ax.grid(True, axis="y", alpha=0.2)
+            fname = os.path.join(plot_dir, "layer_overview.png")
+            fig.tight_layout()
+            fig.savefig(fname, dpi=150)
+            plt.close(fig)
+            print(f"  Saved {fname}")
+
+            print(f"  All plots saved to {plot_dir}/")
+
+        except ImportError:
+            print("\n  WARNING: matplotlib not available, skipping diagnostic plots")
+
+    # ── Save activations for external analysis ────────────────────────────
+    if args.save_activations:
+        act_path = os.path.join(args.output_dir, "wrmd_activations_qwen35.pt")
+        torch.save({
+            "harmful_states": harmful_states,
+            "harmless_states": harmless_states,
+        }, act_path)
+        print(f"\nSaved raw activations: {act_path}")
 
     print("\n=== Done! ===")
     print(f"\nOutput files:")
@@ -591,7 +977,10 @@ def main():
     print(f"  {lbest_path}")
     print(f"  {per_layer_path}")
     print(f"  {coeffs_path}")
+    print(f"  {sv_weights_path}")
     print(f"  {results_path}")
+    if args.diagnostic_plots:
+        print(f"  {plot_dir}/ (scatter plots)")
 
 
 if __name__ == "__main__":

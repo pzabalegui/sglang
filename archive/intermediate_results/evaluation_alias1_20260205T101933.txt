@@ -1,0 +1,7 @@
+=== Evaluación de Benchmark con alias1 ===
+Fecha: Thu Feb  5 10:19:33 CET 2026
+Directorio: ../results
+=========================================
+
+Total archivos a procesar:        0
+

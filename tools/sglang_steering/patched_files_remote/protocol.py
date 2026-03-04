@@ -190,6 +190,8 @@ class SteeringRequest(BaseModel):
     vector_name: str = "default"
     # Scale factor for the projection (1.0 = full subtraction)
     scale: float = 1.0
+    # Decode-time steering scale override (None = use server default)
+    decode_scale: Optional[float] = None
     # Which layers to apply steering to. None = all layers
     layers: Optional[List[int]] = None
 
@@ -635,6 +637,9 @@ class ChatCompletionRequest(BaseModel):
 
     # Steering vector configuration for abliteration
     steering: Optional[SteeringRequest] = None
+    # Flat steering overrides (convenience — merged into steering object)
+    steering_enabled: Optional[bool] = None
+    steering_decode_scale: Optional[float] = None
 
     # OpenAI/SGLang default sampling parameters
     _DEFAULT_SAMPLING_PARAMS = {
@@ -644,6 +649,22 @@ class ChatCompletionRequest(BaseModel):
         "min_p": 0.0,
         "repetition_penalty": 1.0,
     }
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_steering_inputs(cls, values):
+        """Merge flat steering_enabled/steering_decode_scale into steering object."""
+        se = values.pop("steering_enabled", None)
+        sds = values.pop("steering_decode_scale", None)
+        if se is not None or sds is not None:
+            steer = values.get("steering") or {}
+            if isinstance(steer, dict):
+                if se is not None:
+                    steer["enabled"] = se
+                if sds is not None:
+                    steer["decode_scale"] = sds
+                values["steering"] = steer
+        return values
 
     @model_validator(mode="before")
     @classmethod

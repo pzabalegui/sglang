@@ -1,0 +1,18 @@
+# Steering Server - Dependencies
+# Tested with Python 3.10+
+
+# Core
+torch>=2.0.0
+transformers>=4.40.0
+accelerate>=0.27.0
+
+# Quantization (optional, for 4-bit)
+bitsandbytes>=0.42.0
+
+# Utilities
+tqdm>=4.65.0
+
+# For extract_and_serve.py datasets
+datasets>=2.18.0
+pandas>=2.0.0
+requests>=2.31.0

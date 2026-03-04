@@ -1,5 +1,5 @@
 """
-Patch server_args.py to add DAS v1 + v2 + v3 steering CLI arguments.
+Patch server_args.py to add DAS v1 + v2 + v3 + v5 steering CLI arguments.
 
 Adds dataclass fields and argparse CLI args for:
 - v1: steering_vector_path, steering_scale, steering_layers, steering_mode,
@@ -7,6 +7,8 @@ Adds dataclass fields and argparse CLI args for:
 - v2: steering_per_layer_path, steering_attn_scale, steering_mlp_scale,
       steering_kernel, steering_trap_start, steering_trap_end, steering_trap_ramp
 - v3: steering_n_directions, steering_decode_layers
+- v5: steering_attn_scale_full, steering_attn_scale_linear,
+      steering_mlp_scale_full, steering_mlp_scale_linear, steering_k_directions
 
 IMPORTANT: CLI args MUST be inside add_cli_args() method, NOT at module level.
 """
@@ -22,8 +24,13 @@ with open(SA_FILE, "r") as f:
 # Part 1: Add dataclass fields to ServerArgs
 # =============================================
 if ("steering_vector_path" in content and "steering_attn_scale" in content
-        and "steering_n_directions" in content and "steering_intervention_mode" in content):
-    print("server_args.py: Already fully patched (v1 + v2 + v3 + WRMD). Skipping.")
+        and "steering_n_directions" in content and "steering_intervention_mode" in content
+        and "steering_k_directions" in content and "steering_sig_mode" in content
+        and "steering_prefill_mode" in content
+        and "steering_diagnostics" in content
+        and "steering_attn_per_layer_path" in content
+        and "abliteration_vector_path" in content):
+    print("server_args.py: Already fully patched (v1+v2+v3+WRMD+v5+v6+v8+v9+v10+ablit). Skipping.")
     sys.exit(0)
 
 # Determine if v1 fields already exist
@@ -61,7 +68,24 @@ if not has_v1:
     steering_trap_ramp: int = 5
     # === WRMD Additive steering ===
     steering_intervention_mode: str = "projective"
-    steering_layer_coeffs_path: Optional[str] = None"""
+    steering_layer_coeffs_path: Optional[str] = None
+    # === DAS v5: hybrid attention-type steering ===
+    steering_attn_scale_full: float = 0.0
+    steering_attn_scale_linear: float = 0.0
+    steering_mlp_scale_full: float = 0.0
+    steering_mlp_scale_linear: float = 0.0
+    steering_k_directions: int = 4
+    # === DAS v6: sigmoid mode + SV weights ===
+    steering_sig_mode: str = "sigmoid"  # 'sigmoid', 'linear', or 'none'
+    steering_sig_steepness: float = 4.0
+    steering_sv_weights_path: Optional[str] = None
+    # === DAS v8: prefill steering mode ===
+    steering_prefill_mode: str = "sublayer"  # 'sublayer' (v2) or 'fullresidual' (v8)
+    # === DAS v9: diagnostics ===
+    steering_diagnostics: bool = False
+    # === DAS v10: sub-layer direction files ===
+    steering_attn_per_layer_path: Optional[str] = None
+    steering_mlp_per_layer_path: Optional[str] = None"""
 
     content = content.replace(target_field, target_field + steering_fields, 1)
     print("Added v1 + v2 steering dataclass fields")
@@ -86,7 +110,24 @@ elif "steering_attn_scale" not in content:
     steering_trap_ramp: int = 5
     # === WRMD Additive steering ===
     steering_intervention_mode: str = "projective"
-    steering_layer_coeffs_path: Optional[str] = None"""
+    steering_layer_coeffs_path: Optional[str] = None
+    # === DAS v5: hybrid attention-type steering ===
+    steering_attn_scale_full: float = 0.0
+    steering_attn_scale_linear: float = 0.0
+    steering_mlp_scale_full: float = 0.0
+    steering_mlp_scale_linear: float = 0.0
+    steering_k_directions: int = 4
+    # === DAS v6: sigmoid mode + SV weights ===
+    steering_sig_mode: str = "sigmoid"  # 'sigmoid', 'linear', or 'none'
+    steering_sig_steepness: float = 4.0
+    steering_sv_weights_path: Optional[str] = None
+    # === DAS v8: prefill steering mode ===
+    steering_prefill_mode: str = "sublayer"  # 'sublayer' (v2) or 'fullresidual' (v8)
+    # === DAS v9: diagnostics ===
+    steering_diagnostics: bool = False
+    # === DAS v10: sub-layer direction files ===
+    steering_attn_per_layer_path: Optional[str] = None
+    steering_mlp_per_layer_path: Optional[str] = None"""
         content = content.replace(target_field, target_field + v2_fields, 1)
         print("Added v2+v3 steering dataclass fields (v1 already present)")
     else:
@@ -101,7 +142,24 @@ elif "steering_n_directions" not in content:
     steering_decode_layers: Optional[str] = None  # JSON list, e.g. '[35,40,47,55,60]'
     # === WRMD Additive steering ===
     steering_intervention_mode: str = "projective"
-    steering_layer_coeffs_path: Optional[str] = None"""
+    steering_layer_coeffs_path: Optional[str] = None
+    # === DAS v5: hybrid attention-type steering ===
+    steering_attn_scale_full: float = 0.0
+    steering_attn_scale_linear: float = 0.0
+    steering_mlp_scale_full: float = 0.0
+    steering_mlp_scale_linear: float = 0.0
+    steering_k_directions: int = 4
+    # === DAS v6: sigmoid mode + SV weights ===
+    steering_sig_mode: str = "sigmoid"  # 'sigmoid', 'linear', or 'none'
+    steering_sig_steepness: float = 4.0
+    steering_sv_weights_path: Optional[str] = None
+    # === DAS v8: prefill steering mode ===
+    steering_prefill_mode: str = "sublayer"  # 'sublayer' (v2) or 'fullresidual' (v8)
+    # === DAS v9: diagnostics ===
+    steering_diagnostics: bool = False
+    # === DAS v10: sub-layer direction files ===
+    steering_attn_per_layer_path: Optional[str] = None
+    steering_mlp_per_layer_path: Optional[str] = None"""
         content = content.replace(target_field, target_field + v3_fields, 1)
         print("Added v3+WRMD steering dataclass fields (v1+v2 already present)")
     else:
@@ -115,19 +173,84 @@ elif "steering_intervention_mode" not in content:
         wrmd_fields = """
     # === WRMD Additive steering ===
     steering_intervention_mode: str = "projective"
-    steering_layer_coeffs_path: Optional[str] = None"""
+    steering_layer_coeffs_path: Optional[str] = None
+    # === DAS v5: hybrid attention-type steering ===
+    steering_attn_scale_full: float = 0.0
+    steering_attn_scale_linear: float = 0.0
+    steering_mlp_scale_full: float = 0.0
+    steering_mlp_scale_linear: float = 0.0
+    steering_k_directions: int = 4
+    # === DAS v6: sigmoid mode + SV weights ===
+    steering_sig_mode: str = "sigmoid"  # 'sigmoid', 'linear', or 'none'
+    steering_sig_steepness: float = 4.0
+    steering_sv_weights_path: Optional[str] = None
+    # === DAS v8: prefill steering mode ===
+    steering_prefill_mode: str = "sublayer"  # 'sublayer' (v2) or 'fullresidual' (v8)
+    # === DAS v9: diagnostics ===
+    steering_diagnostics: bool = False
+    # === DAS v10: sub-layer direction files ===
+    steering_attn_per_layer_path: Optional[str] = None
+    steering_mlp_per_layer_path: Optional[str] = None"""
         content = content.replace(target_field_wrmd, target_field_wrmd + wrmd_fields, 1)
-        print("Added WRMD dataclass fields (v1+v2+v3 already present)")
+        print("Added WRMD+v5 dataclass fields (v1+v2+v3 already present)")
     else:
         print("WARNING: Could not find insertion point for WRMD fields")
+elif "steering_k_directions" not in content:
+    # v1+v2+v3+WRMD exist, add v5-only fields
+    target_field_v5 = "    steering_layer_coeffs_path: Optional[str] = None"
+    if target_field_v5 in content:
+        v5_fields = """
+    # === DAS v5: hybrid attention-type steering ===
+    steering_attn_scale_full: float = 0.0
+    steering_attn_scale_linear: float = 0.0
+    steering_mlp_scale_full: float = 0.0
+    steering_mlp_scale_linear: float = 0.0
+    steering_k_directions: int = 4
+    # === DAS v6: sigmoid mode + SV weights ===
+    steering_sig_mode: str = "sigmoid"  # 'sigmoid', 'linear', or 'none'
+    steering_sig_steepness: float = 4.0
+    steering_sv_weights_path: Optional[str] = None
+    # === DAS v8: prefill steering mode ===
+    steering_prefill_mode: str = "sublayer"  # 'sublayer' (v2) or 'fullresidual' (v8)
+    # === DAS v9: diagnostics ===
+    steering_diagnostics: bool = False
+    # === DAS v10: sub-layer direction files ===
+    steering_attn_per_layer_path: Optional[str] = None
+    steering_mlp_per_layer_path: Optional[str] = None"""
+        content = content.replace(target_field_v5, target_field_v5 + v5_fields, 1)
+        print("Added v5 dataclass fields (v1+v2+v3+WRMD already present)")
+    else:
+        print("WARNING: Could not find insertion point for v5 fields")
+
+# =============================================
+# Part 1b: Add abliteration dataclass field
+# =============================================
+if "abliteration_vector_path" not in content:
+    # Find the last steering field to insert after
+    ablit_target = "    steering_mlp_per_layer_path: Optional[str] = None"
+    if ablit_target not in content:
+        ablit_target = "    steering_diagnostics: bool = False"
+    if ablit_target in content:
+        ablit_field = """
+    # === Inline Abliteration ===
+    abliteration_vector_path: Optional[str] = None"""
+        content = content.replace(ablit_target, ablit_target + ablit_field, 1)
+        print("Added abliteration_vector_path dataclass field")
+    else:
+        print("WARNING: Could not find insertion point for abliteration field")
 
 # =============================================
 # Part 2: Add CLI args inside add_cli_args()
 # =============================================
 # Find the add_cli_args method and a suitable insertion point inside it
 if ("steering-vector-path" in content and "steering-attn-scale" in content
-        and "steering-n-directions" in content and "steering-intervention-mode" in content):
-    print("CLI args already fully patched (v1+v2+v3+WRMD). Skipping.")
+        and "steering-n-directions" in content and "steering-intervention-mode" in content
+        and "steering-k-directions" in content and "steering-sig-mode" in content
+        and "steering-prefill-mode" in content
+        and "steering-diagnostics" in content
+        and "steering-attn-per-layer-path" in content
+        and "abliteration-vector-path" in content):
+    print("CLI args already fully patched (v1+v2+v3+WRMD+v5+v6+v8+v9+v10+ablit). Skipping.")
 else:
     # Find the end of add_cli_args() - look for the return statement
     target_cli = '        return parser'
@@ -181,10 +304,31 @@ else:
             help="Steering type: 'projective' (remove projection) or 'additive' (add direction)")
         parser.add_argument("--steering-layer-coeffs-path", type=str, default=None,
             help="Path to per-layer scaling coefficients (.pt, shape [n_layers])")
+        # === DAS v5: hybrid attention-type steering CLI args ===
+        parser.add_argument("--steering-attn-scale-full", type=float, default=0.0,
+            help="DAS v5: post-attention steering scale for full-attention layers")
+        parser.add_argument("--steering-attn-scale-linear", type=float, default=0.0,
+            help="DAS v5: post-attention steering scale for linear-attention layers")
+        parser.add_argument("--steering-mlp-scale-full", type=float, default=0.0,
+            help="DAS v5: post-MLP steering scale for full-attention layers")
+        parser.add_argument("--steering-mlp-scale-linear", type=float, default=0.0,
+            help="DAS v5: post-MLP steering scale for linear-attention layers")
+        parser.add_argument("--steering-k-directions", type=int, default=4,
+            help="DAS v5: number of orthogonal WRMD directions per layer")
+        # === DAS v8: prefill steering mode ===
+        parser.add_argument("--steering-prefill-mode", type=str, default="sublayer",
+            help="Prefill steering: 'sublayer' (v2 post-attn+post-MLP) or 'fullresidual' (v8 post-layer on h+residual)")
+        parser.add_argument("--steering-diagnostics", action="store_true", default=False,
+            help="Enable per-layer projection diagnostics (dumps to /tmp/steering_diagnostics.json)")
+        # === DAS v10: sub-layer direction files ===
+        parser.add_argument("--steering-attn-per-layer-path", type=str, default=None,
+            help="DAS v10: Path to attn-specific per-layer directions (.pt, shape [n_layers, k, hidden_size])")
+        parser.add_argument("--steering-mlp-per-layer-path", type=str, default=None,
+            help="DAS v10: Path to MLP-specific per-layer directions (.pt, shape [n_layers, k, hidden_size])")
 
 """
         content = content.replace(target_cli, cli_args + target_cli, 1)
-        print("Added all DAS v1 + v2 + v3 + WRMD CLI args to add_cli_args()")
+        print("Added all DAS v1 + v2 + v3 + WRMD + v5 + v8 CLI args to add_cli_args()")
     elif "steering-attn-scale" not in content:
         # v1 CLI exists, add v2+v3 CLI args after the last v1 arg
         # Find the last v1 steering arg
@@ -226,9 +370,38 @@ else:
             help="Steering type: 'projective' (remove projection) or 'additive' (add direction)")
         parser.add_argument("--steering-layer-coeffs-path", type=str, default=None,
             help="Path to per-layer scaling coefficients (.pt, shape [n_layers])")
+        # === DAS v5: hybrid attention-type steering CLI args ===
+        parser.add_argument("--steering-attn-scale-full", type=float, default=0.0,
+            help="DAS v5: post-attention steering scale for full-attention layers")
+        parser.add_argument("--steering-attn-scale-linear", type=float, default=0.0,
+            help="DAS v5: post-attention steering scale for linear-attention layers")
+        parser.add_argument("--steering-mlp-scale-full", type=float, default=0.0,
+            help="DAS v5: post-MLP steering scale for full-attention layers")
+        parser.add_argument("--steering-mlp-scale-linear", type=float, default=0.0,
+            help="DAS v5: post-MLP steering scale for linear-attention layers")
+        parser.add_argument("--steering-k-directions", type=int, default=4,
+            help="DAS v5: number of orthogonal WRMD directions per layer")
+        # === DAS v6: sigmoid mode + SV weights ===
+        parser.add_argument("--steering-sig-mode", type=str, default="sigmoid",
+            choices=["sigmoid", "linear", "none"],
+            help="DAS v6: adaptive scaling mode ('sigmoid'=v5, 'linear'=proportional ramp, 'none'=fixed)")
+        parser.add_argument("--steering-sig-steepness", type=float, default=4.0,
+            help="DAS v6: sigmoid steepness (only used in sigmoid mode, default=4.0)")
+        parser.add_argument("--steering-sv-weights-path", type=str, default=None,
+            help="Path to per-direction SV weights (.pt, shape [n_layers, k]) for proportional weighting")
+        # === DAS v8: prefill steering mode ===
+        parser.add_argument("--steering-prefill-mode", type=str, default="sublayer",
+            help="Prefill steering: 'sublayer' (v2 post-attn+post-MLP) or 'fullresidual' (v8 post-layer on h+residual)")
+        parser.add_argument("--steering-diagnostics", action="store_true", default=False,
+            help="Enable per-layer projection diagnostics (dumps to /tmp/steering_diagnostics.json)")
+        # === DAS v10: sub-layer direction files ===
+        parser.add_argument("--steering-attn-per-layer-path", type=str, default=None,
+            help="DAS v10: Path to attn-specific per-layer directions (.pt, shape [n_layers, k, hidden_size])")
+        parser.add_argument("--steering-mlp-per-layer-path", type=str, default=None,
+            help="DAS v10: Path to MLP-specific per-layer directions (.pt, shape [n_layers, k, hidden_size])")
 """
             content = content.replace(last_v1_arg, last_v1_arg + v2_cli, 1)
-            print("Added v2+v3+WRMD CLI args after existing v1 args")
+            print("Added v2+v3+WRMD+v5 CLI args after existing v1 args")
         else:
             print("WARNING: Could not find last v1 CLI arg to extend")
     elif "steering-n-directions" not in content:
@@ -247,20 +420,62 @@ else:
             help="Steering type: 'projective' (remove projection) or 'additive' (add direction)")
         parser.add_argument("--steering-layer-coeffs-path", type=str, default=None,
             help="Path to per-layer scaling coefficients (.pt, shape [n_layers])")
+        # === DAS v5: hybrid attention-type steering CLI args ===
+        parser.add_argument("--steering-attn-scale-full", type=float, default=0.0,
+            help="DAS v5: post-attention steering scale for full-attention layers")
+        parser.add_argument("--steering-attn-scale-linear", type=float, default=0.0,
+            help="DAS v5: post-attention steering scale for linear-attention layers")
+        parser.add_argument("--steering-mlp-scale-full", type=float, default=0.0,
+            help="DAS v5: post-MLP steering scale for full-attention layers")
+        parser.add_argument("--steering-mlp-scale-linear", type=float, default=0.0,
+            help="DAS v5: post-MLP steering scale for linear-attention layers")
+        parser.add_argument("--steering-k-directions", type=int, default=4,
+            help="DAS v5: number of orthogonal WRMD directions per layer")
+        # === DAS v6: sigmoid mode + SV weights ===
+        parser.add_argument("--steering-sig-mode", type=str, default="sigmoid",
+            choices=["sigmoid", "linear", "none"],
+            help="DAS v6: adaptive scaling mode ('sigmoid'=v5, 'linear'=proportional ramp, 'none'=fixed)")
+        parser.add_argument("--steering-sig-steepness", type=float, default=4.0,
+            help="DAS v6: sigmoid steepness (only used in sigmoid mode, default=4.0)")
+        parser.add_argument("--steering-sv-weights-path", type=str, default=None,
+            help="Path to per-direction SV weights (.pt, shape [n_layers, k]) for proportional weighting")
+        # === DAS v8: prefill steering mode ===
+        parser.add_argument("--steering-prefill-mode", type=str, default="sublayer",
+            help="Prefill steering: 'sublayer' (v2 post-attn+post-MLP) or 'fullresidual' (v8 post-layer on h+residual)")
+        parser.add_argument("--steering-diagnostics", action="store_true", default=False,
+            help="Enable per-layer projection diagnostics (dumps to /tmp/steering_diagnostics.json)")
+        # === DAS v10: sub-layer direction files ===
+        parser.add_argument("--steering-attn-per-layer-path", type=str, default=None,
+            help="DAS v10: Path to attn-specific per-layer directions (.pt, shape [n_layers, k, hidden_size])")
+        parser.add_argument("--steering-mlp-per-layer-path", type=str, default=None,
+            help="DAS v10: Path to MLP-specific per-layer directions (.pt, shape [n_layers, k, hidden_size])")
 """
             content = content.replace(last_v2_arg, last_v2_arg + v3_cli, 1)
-            print("Added v3+WRMD CLI args after existing v2 args")
+            print("Added v3+WRMD+v5 CLI args after existing v2 args")
         else:
             print("WARNING: Could not find last v2 CLI arg to extend")
     elif "steering-intervention-mode" not in content:
         # v1+v2+v3 CLI exist, add WRMD-only CLI args
-        last_existing_arg = 'help="DAS v3: JSON list of decode steering layers'
-        idx = content.find(last_existing_arg)
-        if idx < 0:
-            last_existing_arg = 'help="DAS v2: trapezoidal kernel ramp width")'
-            idx = content.find(last_existing_arg)
+        # Find the LAST steering-related closing paren ")" to insert after
+        # Search for the trap-ramp arg close first, then decode-layers
+        for marker in [
+            'help="DAS v2: trapezoidal kernel ramp width")',
+            "help=\"DAS v2: trapezoidal kernel ramp width\",\n        )",
+            "help=\"DAS v3: JSON list of decode steering layers",
+        ]:
+            idx = content.find(marker)
+            if idx >= 0:
+                # Find the closing ')' of this parser.add_argument call
+                close_idx = content.find(")", idx + len(marker) - 1)
+                if close_idx < 0:
+                    close_idx = content.find(")", idx)
+                # Find the end of the line with the closing paren
+                end_idx = content.find("\n", close_idx)
+                break
+        else:
+            idx = -1
+
         if idx >= 0:
-            end_idx = content.find("\n", idx)
             wrmd_cli = """
         # === WRMD Additive steering CLI args ===
         parser.add_argument("--steering-intervention-mode", type=str, default="projective",
@@ -268,11 +483,96 @@ else:
             help="Steering type: 'projective' (remove projection) or 'additive' (add direction)")
         parser.add_argument("--steering-layer-coeffs-path", type=str, default=None,
             help="Path to per-layer scaling coefficients (.pt, shape [n_layers])")
+        # === DAS v5: hybrid attention-type steering CLI args ===
+        parser.add_argument("--steering-attn-scale-full", type=float, default=0.0,
+            help="DAS v5: post-attention steering scale for full-attention layers")
+        parser.add_argument("--steering-attn-scale-linear", type=float, default=0.0,
+            help="DAS v5: post-attention steering scale for linear-attention layers")
+        parser.add_argument("--steering-mlp-scale-full", type=float, default=0.0,
+            help="DAS v5: post-MLP steering scale for full-attention layers")
+        parser.add_argument("--steering-mlp-scale-linear", type=float, default=0.0,
+            help="DAS v5: post-MLP steering scale for linear-attention layers")
+        parser.add_argument("--steering-k-directions", type=int, default=4,
+            help="DAS v5: number of orthogonal WRMD directions per layer")
+        # === DAS v6: sigmoid mode + SV weights ===
+        parser.add_argument("--steering-sig-mode", type=str, default="sigmoid",
+            choices=["sigmoid", "linear", "none"],
+            help="DAS v6: adaptive scaling mode ('sigmoid'=v5, 'linear'=proportional ramp, 'none'=fixed)")
+        parser.add_argument("--steering-sig-steepness", type=float, default=4.0,
+            help="DAS v6: sigmoid steepness (only used in sigmoid mode, default=4.0)")
+        parser.add_argument("--steering-sv-weights-path", type=str, default=None,
+            help="Path to per-direction SV weights (.pt, shape [n_layers, k]) for proportional weighting")
+        # === DAS v8: prefill steering mode ===
+        parser.add_argument("--steering-prefill-mode", type=str, default="sublayer",
+            help="Prefill steering: 'sublayer' (v2 post-attn+post-MLP) or 'fullresidual' (v8 post-layer on h+residual)")
+        parser.add_argument("--steering-diagnostics", action="store_true", default=False,
+            help="Enable per-layer projection diagnostics (dumps to /tmp/steering_diagnostics.json)")
+        # === DAS v10: sub-layer direction files ===
+        parser.add_argument("--steering-attn-per-layer-path", type=str, default=None,
+            help="DAS v10: Path to attn-specific per-layer directions (.pt, shape [n_layers, k, hidden_size])")
+        parser.add_argument("--steering-mlp-per-layer-path", type=str, default=None,
+            help="DAS v10: Path to MLP-specific per-layer directions (.pt, shape [n_layers, k, hidden_size])")
 """
             content = content[:end_idx + 1] + wrmd_cli + content[end_idx + 1:]
-            print("Added WRMD CLI args after existing v1+v2+v3 args")
+            print("Added WRMD+v5 CLI args after existing v1+v2+v3 args")
         else:
             print("WARNING: Could not find insertion point for WRMD CLI args")
+    elif "steering-k-directions" not in content:
+        # v1+v2+v3+WRMD CLI exist, add v5-only CLI args
+        last_wrmd_arg = 'help="Path to per-layer scaling coefficients (.pt, shape [n_layers])")'
+        if last_wrmd_arg in content:
+            v5_cli = """
+        # === DAS v5: hybrid attention-type steering CLI args ===
+        parser.add_argument("--steering-attn-scale-full", type=float, default=0.0,
+            help="DAS v5: post-attention steering scale for full-attention layers")
+        parser.add_argument("--steering-attn-scale-linear", type=float, default=0.0,
+            help="DAS v5: post-attention steering scale for linear-attention layers")
+        parser.add_argument("--steering-mlp-scale-full", type=float, default=0.0,
+            help="DAS v5: post-MLP steering scale for full-attention layers")
+        parser.add_argument("--steering-mlp-scale-linear", type=float, default=0.0,
+            help="DAS v5: post-MLP steering scale for linear-attention layers")
+        parser.add_argument("--steering-k-directions", type=int, default=4,
+            help="DAS v5: number of orthogonal WRMD directions per layer")
+        # === DAS v6: sigmoid mode + SV weights ===
+        parser.add_argument("--steering-sig-mode", type=str, default="sigmoid",
+            choices=["sigmoid", "linear", "none"],
+            help="DAS v6: adaptive scaling mode ('sigmoid'=v5, 'linear'=proportional ramp, 'none'=fixed)")
+        parser.add_argument("--steering-sig-steepness", type=float, default=4.0,
+            help="DAS v6: sigmoid steepness (only used in sigmoid mode, default=4.0)")
+        parser.add_argument("--steering-sv-weights-path", type=str, default=None,
+            help="Path to per-direction SV weights (.pt, shape [n_layers, k]) for proportional weighting")
+        # === DAS v8: prefill steering mode ===
+        parser.add_argument("--steering-prefill-mode", type=str, default="sublayer",
+            help="Prefill steering: 'sublayer' (v2 post-attn+post-MLP) or 'fullresidual' (v8 post-layer on h+residual)")
+        parser.add_argument("--steering-diagnostics", action="store_true", default=False,
+            help="Enable per-layer projection diagnostics (dumps to /tmp/steering_diagnostics.json)")
+        # === DAS v10: sub-layer direction files ===
+        parser.add_argument("--steering-attn-per-layer-path", type=str, default=None,
+            help="DAS v10: Path to attn-specific per-layer directions (.pt, shape [n_layers, k, hidden_size])")
+        parser.add_argument("--steering-mlp-per-layer-path", type=str, default=None,
+            help="DAS v10: Path to MLP-specific per-layer directions (.pt, shape [n_layers, k, hidden_size])")
+"""
+            content = content.replace(last_wrmd_arg, last_wrmd_arg + v5_cli, 1)
+            print("Added v5 CLI args after existing v1+v2+v3+WRMD args")
+        else:
+            print("WARNING: Could not find last WRMD CLI arg to extend")
+
+# =============================================
+# Part 2b: Add abliteration CLI arg
+# =============================================
+if "abliteration-vector-path" not in content:
+    ablit_cli_target = '        return parser'
+    if ablit_cli_target in content:
+        ablit_cli = """
+        # === Inline Abliteration ===
+        parser.add_argument("--abliteration-vector-path", type=str, default=None,
+            help="Path to abliteration direction vector (.pt, shape [hidden_size]). "
+                 "Enables per-request weight-equivalent abliteration without modifying weights.")
+"""
+        content = content.replace(ablit_cli_target, ablit_cli + ablit_cli_target, 1)
+        print("Added abliteration-vector-path CLI arg")
+    else:
+        print("WARNING: Could not find insertion point for abliteration CLI arg")
 
 with open(SA_FILE, "w") as f:
     f.write(content)

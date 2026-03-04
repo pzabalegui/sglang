@@ -155,10 +155,11 @@ if [ -f "${SCRIPTS_DIR}/sweep_scales_qwen35.py" ]; then
     echo "  Copied sweep_scales_qwen35.py to /tmp/"
 fi
 
-# Benchmark scripts
-for script in benchmark_single.py sweep_supreme.py; do
+# Benchmark and test scripts
+for script in benchmark_single.py sweep_supreme.py test_concurrent_v5.py; do
     if [ -f "${SCRIPTS_DIR}/${script}" ]; then
         cp "${SCRIPTS_DIR}/${script}" "/tmp/${script}"
+        echo "  Copied ${script} to /tmp/"
     fi
 done
 

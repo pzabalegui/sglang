@@ -1,0 +1,849 @@
+[
+  {
+    "id": "6504ace0-5ac4-4011-9093-39c8eb47644e",
+    "source": "cs161_textbook",
+    "question": "In the context of IP routing using BGP, why would relying solely on higher layer defenses be an insufficient strategy to protect against malicious activity by local networks?",
+    "choices": [
+      "A: Higher layer defenses can prevent misrouting but do not protect against traffic analysis.",
+      "B: BGP operates at layer 3 and therefore is unaffected by defenses implemented at higher layers.",
+      "C: Malicious local networks could still read and potentially modify messages in transit, despite higher layer defenses.",
+      "D: BGP is designed to be self-securing and does not require additional defenses."
+    ],
+    "answer": "C",
+    "topics": [
+      "SystemSecurity",
+      "ApplicationSecurity"
+    ],
+    "keyword": "Defense Strategy"
+  },
+  {
+    "id": "c5b74dba-8274-44b1-b642-d7f3847611f2",
+    "source": "windows_security",
+    "question": "In reviewing the security logs of a Windows system, you come across several entries pertaining to the use of user rights. Match the event IDs with their correct descriptions based on standard Windows audit policies.",
+    "choices": [
+      "A: Event ID 576: Privileges were used on an already open handle to a protected object.",
+      "B: Event ID 577: A user attempted to perform a privileged system service operation.",
+      "C: Event ID 578: Specified privileges were added to a user's access token upon login.",
+      "D: Event ID 577: Specified privileges were added to a user's access token upon login."
+    ],
+    "answer": "B",
+    "topics": [
+      "SystemSecurity",
+      "ApplicationSecurity"
+    ],
+    "keyword": "Security Log Events"
+  },
+  {
+    "id": "bbe80472-9565-4a25-9717-49aaf950e469",
+    "source": "cwe",
+    "question": "A web application has a functionality that allows users to upload pictures. The current implementation directly stores the uploaded files in a public directory, using the original filenames provided by users. Which of the following practices would NOT contribute to securing the file upload process?",
+    "choices": [
+      "A: Implementing server-side validation checks that are also performed on the client side.",
+      "B: Limiting the uploaded file extensions to a predefined list of safe extensions like .jpg and .png.",
+      "C: Storing uploaded files in a directory that is not accessible directly via URL, and serving them through a separate script or process.",
+      "D: Using only client-side JavaScript to check the file extension and size before allowing the upload to proceed."
+    ],
+    "answer": "D",
+    "topics": [
+      "WebSecurity",
+      "SystemSecurity",
+      "Vulnerability"
+    ],
+    "keyword": "UploadMitigation"
+  },
+  {
+    "id": "29eee2b8-f83d-4bc3-80d2-8733dd936767",
+    "source": "attck",
+    "question": "In an effort to bolster defense against potential persistence attacks through Microsoft Office applications, which of the following statements correctly assess the effectiveness of proposed mitigation methods?",
+    "choices": [
+      "A: Disabling Office VBA macros and add-ins completely prevents execution of any malicious Office Template Macros and Outlook Rules.",
+      "B: Microsoft's release of patches such as KB3191938, KB4011091, and KB4011162 is ineffective because they do not prevent the execution of all forms of malicious code in Outlook.",
+      "C: Setting Registry permissions to 'Read Control' can effectively mitigate the Office Test method by hindering unauthorized changes without elevated privileges.",
+      "D: Enabling Attack Surface Reduction (ASR) rules is ineffective against all Outlook-based persistence methods since they do not apply to email client behavior."
+    ],
+    "answer": "C",
+    "topics": [
+      "SystemSecurity",
+      "PenTest"
+    ],
+    "keyword": "Mitigation Strategies"
+  },
+  {
+    "id": "bb73d512-538a-47f4-8be7-d2b431e7f1d3",
+    "source": "cs161_textbook",
+    "question": "A web application uses the following Python code snippet to execute arithmetic operations based on user input: `result = eval(user_input)`. Considering the risk of code injection attacks, which of the following inputs could potentially lead to unintended code execution on the server if user input is not properly sanitized? Select all that apply.",
+    "choices": [
+      "A: 4*5; import os; os.system('ls /')",
+      "B: '4' + '5'",
+      "C: 4 - 5 if (1==1) else 0",
+      "D: 4/0; __import__('os').system('shutdown -h now')"
+    ],
+    "answer": "AD",
+    "topics": [
+      "WebSecurity"
+    ],
+    "keyword": "SQL Injection"
+  },
+  {
+    "id": "d2c78265-42c8-4b5d-b615-33e8c899b6f3",
+    "source": "attck",
+    "question": "An organization is working to improve its web application security. As part of this initiative, they want to mitigate the risk of adversaries stealing web session cookies to gain unauthorized access. Which of the following measures could effectively decrease the risk of session cookie theft?",
+    "choices": [
+      "A: Implementing a physical second factor authentication that relies on the target login domain for protocol negotiation.",
+      "B: Regularly updating user passwords to ensure they are complex and unique.",
+      "C: Allowing users to stay logged in indefinitely to avoid frequent re-authentication and potential cookie theft during login.",
+      "D: Disabling cookies entirely on the organization's web applications to prevent any possibility of theft."
+    ],
+    "answer": "A",
+    "topics": [
+      "WebSecurity",
+      "PenTest"
+    ],
+    "keyword": "Session Cookie"
+  },
+  {
+    "id": "86a4aad8-d3b6-4360-9568-af9f843db9f5",
+    "source": "cs161_textbook",
+    "question": "You are tasked with enhancing the security of a corporate network. Given the need to monitor potentially malicious activities, where could you install detectors to improve intrusion detection, and what is a potential advantage and drawback of each location? Select two sets of valid options.",
+    "choices": [
+      "A: Perimeter of the network: Advantage - Monitors all incoming and outgoing traffic; Drawback - Unable to detect insider threats.",
+      "B: On each host: Advantage - Personalized security measures; Drawback - High maintenance due to numerous endpoints.",
+      "C: In the cloud: Advantage - Global visibility; Drawback - Limited by cloud provider's infrastructure.",
+      "D: On the main server only: Advantage - Centralized management; Drawback - Single point of failure."
+    ],
+    "answer": "AB",
+    "topics": [
+      "WebSecurity"
+    ],
+    "keyword": "IntrusionDetectionPlacement"
+  },
+  {
+    "id": "1c64ff34-54ef-43c6-b136-bd405b07fa54",
+    "source": "cs161_textbook",
+    "question": "A stateful packet filter is experiencing intermittent failures when handling incoming network traffic, resulting in legitimate connections being dropped. Which of the following could be a plausible explanation for this behavior?",
+    "choices": [
+      "A: The packet filter is correctly dropping packets that do not match any rule in the access control policy.",
+      "B: The packet filter's memory is depleted due to maintaining too much information per connection.",
+      "C: The packet filter is not maintaining state and therefore cannot determine the context of the packets.",
+      "D: The packet filter is forwarding all packets, including those that should be dropped according to the access control policy."
+    ],
+    "answer": "B",
+    "topics": [
+      "SystemSecurity"
+    ],
+    "keyword": "FirewallFailure"
+  },
+  {
+    "id": "29d4966e-05ff-4f81-9f0d-ed8b141d1e8b",
+    "source": "apple_platform_security",
+    "question": "Which of the following statements accurately describe the security mechanisms and benefits of the Secure Enclave in Apple devices? Select all that apply.",
+    "choices": [
+      "A: The Secure Enclave includes an AES engine to perform efficient and secure cryptographic operations, enhancing data encryption and decryption.",
+      "B: The Secure Enclave Processor starts with an A11 and S4, includes a memory-protected engine, and encrypted memory with anti-replay capabilities.",
+      "C: The Memory Protection Engine uses a static key to encrypt Secure Enclave memory, ensuring data remains secure even in the event of processor kernel compromise.",
+      "D: The Secure Enclave Boot ROM is immutable code that establishes a hardware root of trust and verifies the sepOS image signature before booting."
+    ],
+    "answer": "ABD",
+    "topics": [
+      "SystemSecurity",
+      "ApplicationSecurity"
+    ],
+    "keyword": "Secure Enclave"
+  },
+  {
+    "id": "123c52f1-ef4e-4168-b626-c5842bb9bf98",
+    "source": "cs161_textbook",
+    "question": "A developer is implementing input sanitization to prevent XSS attacks on a web application. Examine the following code snippets and select the measures that would effectively prevent XSS attacks. Assume all other security measures are constant and not shown in the examples.",
+    "choices": [
+      "A: Using a regex pattern to remove instances of `<script>` and `</script>` from user input.",
+      "B: Encoding special characters such as `<` and `>` into their respective HTML entities like `&lt;` and `&gt;`.",
+      "C: Implementing a whitelist of allowed HTML tags and attributes, and stripping out all others from user input.",
+      "D: Applying a library that provides standardized sanitizations known to be robust against various XSS attack vectors."
+    ],
+    "answer": "BCD",
+    "topics": [
+      "WebSecurity"
+    ],
+    "keyword": "XSS"
+  },
+  {
+    "id": "045b9ca3-4c09-41af-b8a7-16f88edfc59e",
+    "source": "owasp_wstg",
+    "question": "A web application developer is reviewing their codebase to mitigate potential DOM-based XSS vulnerabilities. Which of the following measures should the developer implement to effectively prevent DOM-based XSS attacks?",
+    "choices": [
+      "A: Store all user-generated content on the server-side in a database without any sanitation.",
+      "B: Use document.write() to dynamically generate content based on URL parameters without encoding.",
+      "C: Apply context-sensitive encoding and use safe JavaScript APIs that treat user input as data, not code.",
+      "D: Disable JavaScript entirely on the website to prevent the possibility of script execution."
+    ],
+    "answer": "C",
+    "topics": [
+      "WebSecurity",
+      "ApplicationSecurity"
+    ],
+    "keyword": "DOM-based XSS Prevention"
+  },
+  {
+    "id": "84b19ad2-602e-4328-8531-05e9a17d1b7c",
+    "source": "windows_security",
+    "question": "An administrator is configuring auditing policies on a Windows system and wants to ensure that event 4670(S) is generated when permissions on file system objects are changed. Which of the following actions should be taken to ensure that the event is logged, and what will NOT trigger the event?",
+    "choices": [
+      "A: Set 'Change Permissions' and/or 'Take Ownership' in the file system object’s SACL to ensure logging; changing the SACL itself will not trigger the event.",
+      "B: Set 'Write DAC' and/or 'Write Owner' in the registry object’s SACL to ensure logging; changing the owner of the file system object will not trigger the event.",
+      "C: Set 'Execute File' and/or 'Delete' in the file system object’s SACL to ensure logging; changing the SACL itself will trigger the event.",
+      "D: Set 'Read Data' and/or 'List Folder' in the file system object’s SACL to ensure logging; changing the object's data will trigger the event."
+    ],
+    "answer": "AB",
+    "topics": [
+      "SystemSecurity",
+      "WebSecurity"
+    ],
+    "keyword": "SACL"
+  },
+  {
+    "id": "f700d18a-3d8d-4f3e-bd20-afa6eebfb5fe",
+    "source": "attck",
+    "question": "An adversary has gained access to a corporate network and plans to perform network configuration discovery to further their attack. Which of the following techniques or commands could the adversary use to gather network configuration details such as IP/MAC addresses, routing information, and adapter configurations? Select two.",
+    "choices": [
+      "A: Executing `net use` to map all shared resources on the network and list associated network configurations.",
+      "B: Running `ipconfig /all` on a Windows system to display all current TCP/IP network configuration values.",
+      "C: Using `ifconfig` on a Linux system to display the current network configuration for all interfaces.",
+      "D: Invoking `dir /s` on a Windows system to recursively search for network settings files."
+    ],
+    "answer": "BC",
+    "topics": [
+      "PenTest",
+      "SystemSecurity"
+    ],
+    "keyword": "ipconfig /all"
+  },
+  {
+    "id": "3d77a173-7d7e-47b9-9694-fc604c435b5e",
+    "source": "windows_security",
+    "question": "You have been appointed as the lead of a security team responsible for safeguarding the infrastructure of a large organization. Among your first tasks is to align your team's activities with industry-standard security practices. Which of the following initiatives would you prioritize to enhance your team's security posture?",
+    "choices": [
+      "A: Implementing a security development lifecycle to integrate security at every phase of software development",
+      "B: Exclusively focusing on endpoint security solutions to protect against malware",
+      "C: Relying solely on a bug bounty program to identify and fix all security vulnerabilities",
+      "D: Adopting a common criteria approach for evaluating the security and reliability of IT products"
+    ],
+    "answer": "AD",
+    "topics": [
+      "SystemSecurity",
+      "SoftwareSecurity"
+    ],
+    "keyword": "security development lifecycle"
+  },
+  {
+    "id": "f449e2ce-5fcc-4308-b063-10622dba5635",
+    "source": "mit6.858",
+    "question": "Considering the mitigations proposed for speculative execution vulnerabilities, what are some valid statements regarding the benefits and drawbacks of the strategies for Variant 1, Variant 2, and Variant 3?",
+    "choices": [
+      "A: Variant 1 mitigation involves modifying the code to constrain indices, which may lead to performance overheads due to additional bounds checking.",
+      "B: Variant 2 mitigation through the use of retpoline introduces an infinite loop that is never executed, causing a slowdown in all indirect jumps.",
+      "C: Variant 3 mitigation using Kernel page table isolation (KPTI) completely eliminates the performance overhead as it uses two separate page tables for user and kernel.",
+      "D: Reducing shared resources when processing secret data by using a separate core with its own cache is an easy and straightforward solution to implement."
+    ],
+    "answer": "AB",
+    "topics": [
+      "SystemSecurity",
+      "SoftwareSecurity"
+    ],
+    "keyword": "Mitigations"
+  },
+  {
+    "id": "6854dc46-a644-4948-ab52-870c6926b5df",
+    "source": "owasp_wstg",
+    "question": "A web application has implemented a self-service password reset feature that sends a password reset link to the user's registered email address. To ensure this feature is secure against potential account compromise, which of the following measures should be applied? (Select TWO.)",
+    "choices": [
+      "A: The reset link should expire after a single use or within a short time frame.",
+      "B: The application should display the user's password in plain text in the reset email for verification purposes.",
+      "C: The user should be required to answer multiple security questions accurately before a reset link is sent.",
+      "D: The reset link should lead the user to a page where they can view the last five passwords and choose a new one."
+    ],
+    "answer": "AC",
+    "topics": [
+      "WebSecurity",
+      "ApplicationSecurity"
+    ],
+    "keyword": "Password Reset Security"
+  },
+  {
+    "id": "888053ac-44db-4b44-bb34-b7fed5d3b56c",
+    "source": "apple_platform_security",
+    "question": "A user is adding their state ID to their Apple Wallet on their iPhone and Apple Watch. Which of the following steps are part of the security process to ensure the user's identity and protect their personal information during this process?",
+    "choices": [
+      "A: The user must scan the front and back of their physical ID, and the images are encrypted and sent to the state issuing authority.",
+      "B: To prevent fraud, a ten-digit value based on the user's device use patterns is sent to the state issuing authority.",
+      "C: The user's device ties a matched Face ID or Touch ID biometric to the state ID to confirm that only the rightful owner can present it.",
+      "D: A key pair is generated in the Secure Element by the paired Apple Watch that anchors the user's ID to the Apple Watch."
+    ],
+    "answer": "ACD",
+    "topics": [
+      "ApplicationSecurity",
+      "SystemSecurity"
+    ],
+    "keyword": "Biometric"
+  },
+  {
+    "id": "83c99b71-e65e-4d7d-8637-c1e9350114f2",
+    "source": "windows_security",
+    "question": "A security administrator is assessing potential vulnerabilities in a corporate environment where employees frequently connect external devices to company laptops. Which security feature should be prioritized to mitigate the risk of unauthorized data access through such external devices?",
+    "choices": [
+      "A: Implementing biometric authentication for device access.",
+      "B: Enforcing a security policy that prevents drive-by DMA attacks via external devices.",
+      "C: Deploying antivirus software to scan for malware on external devices.",
+      "D: Configuring session timeouts to reduce the window of opportunity for unauthorized access."
+    ],
+    "answer": "B",
+    "topics": [
+      "SystemSecurity",
+      "ApplicationSecurity"
+    ],
+    "keyword": "Drive-by DMA Attacks"
+  },
+  {
+    "id": "c547da8e-a6b0-44cd-b5cb-07beda081073",
+    "source": "attck",
+    "question": "An adversary with regular user privileges is attempting file and directory discovery on a host system. Which of the following system requirements could hinder the adversary's ability to discover certain files or directories?",
+    "choices": [
+      "A: Files located in public directories that require no special permissions.",
+      "B: Folders requiring Administrator or SYSTEM permissions.",
+      "C: Files that are stored on an external backup drive, currently unplugged.",
+      "D: Directories that are indexed by the system's search functionality."
+    ],
+    "answer": "B",
+    "topics": [
+      "SystemSecurity",
+      "PenTest"
+    ],
+    "keyword": "Access Controls"
+  },
+  {
+    "id": "edc85f6a-29f2-422a-adb8-270b3cba7e7c",
+    "source": "attck",
+    "question": "An organization has identified that adversaries use dynamic DNS resolution to randomly generate subdomains for command and control infrastructure. Which of the following mitigation strategies would be MOST effective in preventing this behavior?",
+    "choices": [
+      "A: Implementing strict firewall rules to block all incoming and outgoing DNS traffic.",
+      "B: Using a local DNS sinkhole to help prevent behaviors associated with dynamic resolution.",
+      "C: Enforcing a policy that requires manual approval for all domain name registrations within the organization.",
+      "D: Disabling all dynamic DNS services within the organization's internal network."
+    ],
+    "answer": "B",
+    "topics": [
+      "NetworkSecurity",
+      "SystemSecurity",
+      "PenTest"
+    ],
+    "keyword": "DNS Sinkhole"
+  },
+  {
+    "id": "9748edda-3056-40f2-a5e4-bc9df7ea0909",
+    "source": "attck",
+    "question": "An adversary is attempting to gain access to restricted information within an organization's network. They have identified several password storage locations on various systems. Which of the following techniques could the adversary use to access these credentials and potentially perform lateral movement?",
+    "choices": [
+      "A: Exploiting a vulnerability in the organization's WAF (Web Application Firewall) to gain access to the passwords.",
+      "B: Using credential dumping tools such as Mimikatz to obtain account and password information from systems and resources.",
+      "C: Performing a DDoS (Distributed Denial of Service) attack to overwhelm the system and reveal stored credentials.",
+      "D: Phishing employees to install a keylogger that will capture keystrokes and send credentials directly to the adversary."
+    ],
+    "answer": "B",
+    "topics": [
+      "SystemSecurity",
+      "PenTest"
+    ],
+    "keyword": "Credential Dumping"
+  },
+  {
+    "id": "8a7f4b45-112c-4794-8a92-82b457cbd683",
+    "source": "apple_platform_security",
+    "question": "You are configuring a smart home environment using HomeKit-enabled devices and a HomeKit-compatible router. Which of the following settings and security measures should you apply to ensure optimal security and functionality for your HomeKit accessories and data?",
+    "choices": [
+      "A: Use the router's main Wi-Fi password for HomeKit accessories to simplify network management.",
+      "B: Configure the HomeKit router using the router manufacturer’s app to validate user access and add it to the Home app.",
+      "C: Store HomeKit data on the device using the Data Protection class Protected Until First User Authentication and encrypt backups with HomeKit identity keys and a random nonce.",
+      "D: Set HomeKit accessories to 'Automatic' access restriction mode, which will allow them to communicate with only a pre-approved list of internet sites and local ports."
+    ],
+    "answer": "BCD",
+    "topics": [
+      "ApplicationSecurity",
+      "NetworkSecurity"
+    ],
+    "keyword": "HomeKit"
+  },
+  {
+    "id": "5d0334d9-8c66-4218-9fc3-a46106d44a29",
+    "source": "attck",
+    "question": "A company's security team is reviewing their defense strategy against potential firmware corruption attacks on their network devices. Which of the following actions would be effective in both preventing firmware corruption and ensuring device availability, and what is a potential downside of this action?",
+    "choices": [
+      "A: Install a modified bootloader to prevent unauthorized boot-ups, but this may introduce compatibility issues with some legitimate software.",
+      "B: Patch the BIOS and other firmware routinely to prevent exploitation of known vulnerabilities, though this may cause system downtime during the update process.",
+      "C: Remove all firmware access from the network to prevent tampering, which could hinder necessary updates and maintenance tasks.",
+      "D: Encrypt all firmware data to prevent unauthorized changes, but encryption may increase the boot time of the devices."
+    ],
+    "answer": "B",
+    "topics": [
+      "SystemSecurity",
+      "PenTest"
+    ],
+    "keyword": "Firmware Corruption"
+  },
+  {
+    "id": "42c276a8-419d-4897-b88f-bb29727d2ee9",
+    "source": "cwe",
+    "question": "A developer is implementing a feature that processes user input for a mail program's subject line, which is expected to allow special characters such as ';' and '>'. Which of the following measures should the developer take to prevent OS command injection while ensuring the application behaves as intended?",
+    "choices": [
+      "A: Rely solely on denylists to filter out known malicious inputs.",
+      "B: Implement strict input validation, rejecting any input that does not strictly adhere to the expected format.",
+      "C: Use proper output encoding and escaping to ensure that special characters are handled correctly.",
+      "D: Strip out all special characters from the subject line to avoid any possibility of command injection."
+    ],
+    "answer": "C",
+    "topics": [
+      "SoftwareSecurity",
+      "ApplicationSecurity",
+      "Vulnerability"
+    ],
+    "keyword": "OSCommandInjection"
+  },
+  {
+    "id": "287a7599-6e41-4a30-b53e-be09d4dd2177",
+    "source": "windows_security",
+    "question": "In the context of Windows security, consider the implications of a security event that indicates a user account has been locked out. What are the potential causes that could trigger this security event, and what should be considered when investigating it?",
+    "choices": [
+      "A: Repeated login attempts with incorrect credentials",
+      "B: Scheduled tasks with outdated credentials",
+      "C: An attempt to change the account's password",
+      "D: Automated services running with the correct credentials"
+    ],
+    "answer": "AB",
+    "topics": [
+      "SystemSecurity",
+      "WebSecurity"
+    ],
+    "keyword": "Security Event Logging"
+  },
+  {
+    "id": "11bf0538-fc05-4a95-be4e-53b72fcb78c6",
+    "source": "cwe",
+    "question": "Review the following pseudocode for a user authentication system and identify the choice(s) that indicate a violation of the 'Economy of Mechanism' principle:\n\nPseudocode:\nfunction authenticateUser(credentials) {\n // Step 1: Perform complex validation of credentials format\n // Step 2: Use a custom hashing algorithm to obscure credentials\n // Step 3: Compare hashed credentials against a list of hashes stored in multiple distributed databases\n // Step 4: Implement a series of non-standard security checks before granting access\n}",
+    "choices": [
+      "A: Step 1 demonstrates an adherence to the principle of 'Economy of Mechanism' by ensuring that credentials follow a specific format.",
+      "B: Step 2 violates the principle by using a custom, potentially obscure hashing algorithm instead of a well-known and tested one.",
+      "C: Step 3 is in line with the principle since it uses multiple databases to enhance security through redundancy.",
+      "D: Step 4's use of non-standard security checks introduces unnecessary complexity, which could lead to misunderstandings and vulnerabilities."
+    ],
+    "answer": "BD",
+    "topics": [
+      "SoftwareSecurity",
+      "Vulnerability"
+    ],
+    "keyword": "SecurityMechanism"
+  },
+  {
+    "id": "e28f1088-c927-4303-a03c-f17dca841538",
+    "source": "windows_security",
+    "question": "Select the outcomes that would NOT be expected following the registration of a trusted logon process with the Local Security Authority:",
+    "choices": [
+      "A: Enhanced system security by allowing only recognized processes to request logon.",
+      "B: Immediate lockout of all user accounts until the new logon process is verified.",
+      "C: Potential for a new authentication mechanism to be used during user logon procedures.",
+      "D: An increase in the number of failed logon attempts due to unrecognized logon processes."
+    ],
+    "answer": "B",
+    "topics": [
+      "SystemSecurity",
+      "WebSecurity"
+    ],
+    "keyword": "Local Security Authority"
+  },
+  {
+    "id": "86ce528a-ba6d-4f03-8ede-e790e260f811",
+    "source": "attck",
+    "question": "In an effort to improve detection of adversarial activities, a cybersecurity team is considering monitoring certain aspects of network traffic. Which combination of data source and component should they prioritize to detect misuse of application layer protocols for malicious communication?",
+    "choices": [
+      "A: Analyzing network traffic content for anomalies in syntax and traffic patterns, combined with correlating unusual process execution and command line arguments.",
+      "B: Monitoring network traffic flow to ensure compliance with organizational policies regarding data storage and transmission.",
+      "C: Focusing on physical network components for signs of tampering that could indicate the presence of unauthorized network taps or devices.",
+      "D: Implementing deep packet inspection for all inbound emails to scan for potential phishing attempts and malware."
+    ],
+    "answer": "A",
+    "topics": [
+      "NetworkSecurity",
+      "WebSecurity",
+      "PenTest"
+    ],
+    "keyword": "Network Traffic Content"
+  },
+  {
+    "id": "867bd867-80a8-4850-ba17-5a2e8266ac14",
+    "source": "cs161_textbook",
+    "question": "You are working with RSA signatures and have been given two large odd prime numbers p and q. You need to compute a number d satisfying the condition 3d = 1 mod phi(pq). Which of the following must be true to successfully compute d and what is a direct consequence of computing it?",
+    "choices": [
+      "A: Primes p and q must satisfy p = 2 mod 3 and q = 2 mod 3, and once d is computed, it can be used to efficiently compute inverses modulo n.",
+      "B: Primes p and q must be congruent to 1 mod 4, and computing d allows one to find the totient function phi(pq).",
+      "C: It is necessary for p and q to be twin primes, and computing d will enable the decryption of messages encrypted with RSA.",
+      "D: No specific congruence relationships are required for p and q, and computing d makes it possible to factorize n."
+    ],
+    "answer": "A",
+    "topics": [
+      "WebSecurity"
+    ],
+    "keyword": "computation"
+  },
+  {
+    "id": "7eb1130f-328f-4106-b07c-4639f7542704",
+    "source": "owasp_wstg",
+    "question": "You are tasked with integrating security practices into the software development life cycle (SDLC) for a new project. Which of the following activities would best align with ensuring security is addressed throughout the SDLC?",
+    "choices": [
+      "A: Implement security testing only after the application has been fully developed and is ready for deployment.",
+      "B: Define security requirements and review security mechanisms such as authentication and data confidentiality during the definition and design phase.",
+      "C: Limit security considerations to the maintenance and operations phase to reduce the complexity of the development process.",
+      "D: Exclude threat modeling from the design phase since it is more effectively performed post-deployment."
+    ],
+    "answer": "B",
+    "topics": [
+      "WebSecurity",
+      "SystemSecurity"
+    ],
+    "keyword": "SDLC"
+  },
+  {
+    "id": "dbbdd987-c6ef-495b-8861-35e37972fcae",
+    "source": "owasp_wstg",
+    "question": "An application security engineer is reviewing the usage of Java APIs within an application to ensure they are not vulnerable to XXE attacks. The engineer is aware that certain APIs require specific configurations to prevent XXE. Which of the following Java APIs, if used without proper configuration, would not prevent an XXE attack?",
+    "choices": [
+      "A: javax.xml.parsers.DocumentBuilderFactory",
+      "B: java.net.URL.openConnection",
+      "C: javax.xml.transform.TransformerFactory",
+      "D: java.io.FileInputStream"
+    ],
+    "answer": "AC",
+    "topics": [
+      "WebSecurity",
+      "SoftwareSecurity"
+    ],
+    "keyword": "XXE"
+  },
+  {
+    "id": "a3cf6caa-82c1-4a45-bb6f-94b7920ca8fb",
+    "source": "d3fend",
+    "question": "An organization suspects that one of its endpoints may have been compromised. The security team needs to investigate the endpoint's health and detect any unauthorized modifications to system files. Which two Detect techniques should be prioritized to address these concerns?",
+    "choices": [
+      "A: File Integrity Monitoring and System Firmware Verification",
+      "B: URL Analysis and File Carving",
+      "C: RPC Traffic Analysis and Peripheral Firmware Verification",
+      "D: Sender MTA Reputation Analysis and Emulated File Analysis"
+    ],
+    "answer": "A",
+    "topics": [
+      "SystemSecurity",
+      "MemorySafety",
+      "PenTest"
+    ],
+    "keyword": "File Integrity Monitoring"
+  },
+  {
+    "id": "890ef2ea-0064-4962-84b3-98e68e0b62bf",
+    "source": "apple_platform_security",
+    "question": "How does the Find My app ensure the privacy and anonymity of users and their devices while locating missing Apple devices?",
+    "choices": [
+      "A: The finder devices send encrypted location information to Apple without any authentication information, preventing Apple from identifying the finder or the owner of the device.",
+      "B: The Find My app uses a static public key for broadcasting from the missing device, allowing only the owner to identify and track their device.",
+      "C: Apple retains a log that correlates finder and owner identities based on the encrypted location information received.",
+      "D: The missing device uses a counter-based key derivation method to frequently update its public key, preventing it from being tracked by a persistent identifier."
+    ],
+    "answer": "AD",
+    "topics": [
+      "SystemSecurity"
+    ],
+    "keyword": "Privacy"
+  },
+  {
+    "id": "8984de7d-d0bd-47be-9b9b-f17c5b679ae1",
+    "source": "apple_platform_security",
+    "question": "In managing the boot security and policy settings for a Mac with Apple silicon, a technician must consider the impact of nonces on the LocalPolicy. What are the potential outcomes or conditions associated with the LocalPolicy Nonce Hash (lpnh) and the RemotePolicy Nonce Hash (rpnh)?",
+    "choices": [
+      "A: The lpnh is used to prevent replay attacks by ensuring the LocalPolicy in use matches the nonce stored in the Secure Storage Component.",
+      "B: The rpnh is updated frequently to prevent unauthorized changes to the LocalPolicy and to reflect the most current user security settings.",
+      "C: During software updates, two LocalPolicy Nonce (LPN) values may be simultaneously valid to provide fallback options in case of an update error.",
+      "D: The rpnh is designed to be constantly synchronized with the lpnh to prevent any discrepancies in the LocalPolicy across different boot environments."
+    ],
+    "answer": "AC",
+    "topics": [
+      "SystemSecurity",
+      "NetworkSecurity"
+    ],
+    "keyword": "NonceHash"
+  },
+  {
+    "id": "94ad635a-ff05-4af0-b521-798e7f3ff9f0",
+    "source": "owasp_wstg",
+    "question": "Consider a web application for an online bookstore that allows users to browse books, add them to their cart, and proceed to checkout. If a user discovers that by intercepting the request during checkout and modifying the price parameter, they can reduce the cost of the book to a lower, unauthorized price, which of the following is the most likely outcome of exploiting this business logic flaw?",
+    "choices": [
+      "A: The application will complete the transaction at the reduced price, resulting in financial loss to the bookstore.",
+      "B: The application will recognize the price discrepancy, alert the user, and request to proceed at the correct price.",
+      "C: The application will automatically generate a discount coupon equal to the price modification attempted by the user.",
+      "D: The application will donate the equivalent amount of the price discrepancy to a literacy charity."
+    ],
+    "answer": "A",
+    "topics": [
+      "WebSecurity"
+    ],
+    "keyword": "Business Logic Vulnerability"
+  },
+  {
+    "id": "5b5e13fc-6e2a-4509-afdf-0ac32489d473",
+    "source": "owasp_mastg",
+    "question": "In the context of mobile application security, particularly for the Android platform, which of the following measures should be implemented to adhere to resilience requirements?",
+    "choices": [
+      "A: Utilizing multi-factor authentication to secure user access.",
+      "B: Implementing obfuscation techniques to protect code against reverse engineering.",
+      "C: Applying the same security measures for both front-end and back-end components.",
+      "D: Ensuring compatibility with all Android versions, including deprecated ones."
+    ],
+    "answer": "B",
+    "topics": [
+      "ApplicationSecurity",
+      "WebSecurity"
+    ],
+    "keyword": "Mobile Application Security"
+  },
+  {
+    "id": "8d15521b-5e1b-452a-9a81-336f56ab5bd5",
+    "source": "owasp_wstg",
+    "question": "You are analyzing a web application for security vulnerabilities and come across a feature that allows users to post content to a public forum. You suspect that this feature could be exploited to perform an incubated attack. Considering the nature of incubated vulnerabilities, which two factors would you prioritize in your assessment to determine the potential for such an attack to be successful?",
+    "choices": [
+      "A: Ensuring that the forum's content posting feature sanitizes user input to prevent stored injections.",
+      "B: Confirming that the application has a recall mechanism that retrieves and displays user-generated content.",
+      "C: Verifying that the server hosting the application is configured to deny installation of new Java packages.",
+      "D: Checking whether the application's session management is robust against side-channel attacks."
+    ],
+    "answer": "AB",
+    "topics": [
+      "WebSecurity",
+      "PenTest"
+    ],
+    "keyword": "incubated vulnerability"
+  },
+  {
+    "id": "42377318-0c16-4ac5-9ba1-dcc430033311",
+    "source": "attck",
+    "question": "A cybersecurity analyst is monitoring a network for potential malicious activities. Which of the following behaviors would MOST likely indicate an adversary is employing a technique to capture video recordings through peripheral devices or video call applications for the purpose of information gathering?",
+    "choices": [
+      "A: An unknown process is regularly executing commands that interact with the video camera APIs and is periodically writing files that contain video or camera image data.",
+      "B: A known process is frequently updating system time settings, causing synchronization issues across the network.",
+      "C: An application is repeatedly generating large volumes of outbound network traffic during off-peak hours.",
+      "D: A process is accessing the file system API at regular intervals to perform routine backups of system logs."
+    ],
+    "answer": "A",
+    "topics": [
+      "SystemSecurity",
+      "ApplicationSecurity",
+      "PenTest"
+    ],
+    "keyword": "Peripheral Device Exploitation"
+  },
+  {
+    "id": "bc5b3422-3a7a-49ac-a77d-1bee63081b50",
+    "source": "android_sec_doc",
+    "question": "Consider an Android device that allows users to set their own root of trust for the purpose of installing custom versions of Android. If this feature is implemented, what security precautions must be in place to maintain the integrity and safety of the device's boot process?",
+    "choices": [
+      "A: The user-settable root of trust can be set remotely by the manufacturer to ensure only authorized versions of Android are installed.",
+      "B: Physical confirmation is required to set or clear the user-settable root of trust, and it must be stored in tamper-evident storage.",
+      "C: The device should boot any version of Android without validation once a user-settable root of trust is configured.",
+      "D: User notification is not necessary when the device boots using the user-settable root of trust since the integrity is already ensured by the user's configuration."
+    ],
+    "answer": "B",
+    "topics": [
+      "SystemSecurity"
+    ],
+    "keyword": "user-settable root of trust"
+  },
+  {
+    "id": "af4073eb-38c4-4689-9624-80d7fdafb711",
+    "source": "cwe",
+    "question": "You are reviewing a piece of code where a 'Book' object is being passed to a method that may modify its contents, potentially leading to unexpected results in subsequent operations. Which of the following code modifications ensures that the originally intended state of the 'Book' object remains unaltered after the method call?",
+    "choices": [
+      "A: Create a deep copy of the 'Book' object and pass the copy to the method.",
+      "B: Mark the 'Book' object as final before passing it to the method.",
+      "C: Pass a new instance of 'Book' with default values to the method.",
+      "D: Implement the 'ReadOnlyBook' interface in 'Book' class and pass a 'ReadOnlyBook' type to the method."
+    ],
+    "answer": "A",
+    "topics": [
+      "SoftwareSecurity",
+      "ApplicationSecurity",
+      "Vulnerability"
+    ],
+    "keyword": "ObjectMutation"
+  },
+  {
+    "id": "b5776ff2-986e-4094-9a50-0e355bc4f823",
+    "source": "cwe",
+    "question": "An application developer needs to store sensitive information, such as API keys, within an application's executable file. Which of the following methods would be the most secure for storing this information, considering that attackers can reverse engineer binary code to obtain secret data?",
+    "choices": [
+      "A: Encrypt the sensitive information using a symmetric key algorithm before embedding it into the executable.",
+      "B: Compress the sensitive information using a standard compression algorithm to reduce its size and then store it in the executable.",
+      "C: Encode the sensitive information using base64 encoding and store it in the executable.",
+      "D: Store the sensitive information in a separate configuration file outside of the executable and encrypt the file."
+    ],
+    "answer": "AD",
+    "topics": [
+      "ApplicationSecurity",
+      "SoftwareSecurity",
+      "Vulnerability"
+    ],
+    "keyword": "SensitiveDataStorage"
+  },
+  {
+    "id": "43cc7654-8a82-448c-a9bc-c4d433e94fdf",
+    "source": "windows_security",
+    "question": "As an IT security professional, you are tasked with enhancing the threat protection capabilities of a company's Windows client systems. Which of the following security measures should you consider implementing to achieve this goal? (Select all that apply.)",
+    "choices": [
+      "A: Regularly updating Windows Defender Antivirus definitions and enabling real-time protection.",
+      "B: Disabling the Windows Firewall to prevent conflicts with third-party antivirus software.",
+      "C: Implementing User Account Control (UAC) to prevent unauthorized changes to the system.",
+      "D: Enabling BitLocker drive encryption to protect data on lost or stolen devices."
+    ],
+    "answer": "ACD",
+    "topics": [
+      "SystemSecurity",
+      "ApplicationSecurity"
+    ],
+    "keyword": "Windows Defender Antivirus"
+  },
+  {
+    "id": "5b009694-5b69-439b-bf74-6d572f1133e1",
+    "source": "apple_platform_security",
+    "question": "An attacker has gained physical possession of an iOS device and is attempting to access encrypted data. Which of the following statements are true regarding the role of Effaceable Storage in this scenario?",
+    "choices": [
+      "A: Effaceable Storage is used to securely wipe cryptographic keys and can prevent the attacker from accessing the data if the device is in their possession.",
+      "B: Keys stored in Effaceable Storage can be part of a key hierarchy that facilitates forward security, but physical possession of the device may allow an attacker to bypass these protections.",
+      "C: The Effaceable Storage on an iOS device is primarily designed to store multimedia files securely and its compromise could directly lead to data leakage.",
+      "D: Effaceable Storage's main role is to facilitate fast wipe of the device, rather than to provide confidentiality against attackers with physical access."
+    ],
+    "answer": "BD",
+    "topics": [
+      "SystemSecurity",
+      "ApplicationSecurity"
+    ],
+    "keyword": "Effaceable Storage"
+  },
+  {
+    "id": "8bbcd18c-9cf7-4dde-a211-9a9345ce4716",
+    "source": "cs161_textbook",
+    "question": "Alice uses onion routing to send a message to Bob via intermediaries Frank, Dan, and Charlie to maintain her anonymity. Choose the statements that correctly describe the security features of onion routing based on the given scenario:",
+    "choices": [
+      "A: Charlie, as the final proxy, is the only one in the chain who knows both the final message and the final recipient.",
+      "B: It is secure to assume that the message Alice sends can be traced back to her by Bob if Frank and Charlie collude.",
+      "C: The message could have been encrypted with Bob's public key for additional security, which would prevent any intermediary from reading the contents of the message.",
+      "D: If all intermediaries besides one are malicious and colluding, they can still easily determine that Alice is communicating with Bob."
+    ],
+    "answer": "AC",
+    "topics": [
+      "WebSecurity"
+    ],
+    "keyword": "OnionRouting"
+  },
+  {
+    "id": "e0256d82-2920-4f82-8a45-3d6702c6b561",
+    "source": "cwe",
+    "question": "An existing system has been found to have a vulnerability due to objects inheriting insecure permissions from their parent. As a security consultant, what recommendations would you make to the development team for remediation?",
+    "choices": [
+      "A: Introduce an access control list (ACL) for each object, specifying the minimum necessary privileges required for operation.",
+      "B: Consolidate all permissions into a single, easily manageable permission set for the entire application.",
+      "C: Instruct the development team to disable all permission checks to streamline performance until a patch can be deployed.",
+      "D: Advise the development team to review and narrow down trust zones within the application, ensuring strict enforcement of trust boundaries."
+    ],
+    "answer": "AD",
+    "topics": [
+      "SystemSecurity",
+      "Vulnerability"
+    ],
+    "keyword": "PermissionMitigation"
+  },
+  {
+    "id": "f8fccbdf-dda6-4658-aa46-8d0a93a07505",
+    "source": "attck",
+    "question": "In the context of the ATT&CK framework, when an adversary employs alternate authentication material such as Kerberos tickets or application access tokens to access different parts of the network, which of the following tactics are they most likely utilizing?",
+    "choices": [
+      "A: Initial Access and Execution",
+      "B: Defense Evasion and Lateral Movement",
+      "C: Discovery and Privilege Escalation",
+      "D: Exfiltration and Impact"
+    ],
+    "answer": "B",
+    "topics": [
+      "SystemSecurity",
+      "PenTest"
+    ],
+    "keyword": "ATT&CK Tactics"
+  },
+  {
+    "id": "d0d4dcad-a18a-4485-a459-43f1b80ccfcf",
+    "source": "mit6.858",
+    "question": "You are a security analyst tasked with finding security vulnerabilities in a large, complex web application. Considering the information from the lecture on bugs and symbolic execution, which two of the following methods would you prioritize to ensure a more comprehensive search for deep, application-specific bugs?",
+    "choices": [
+      "A: Employ fuzzers to generate a high volume of random inputs, hoping to trigger unexpected behavior and catch simple bugs like buffer overflows.",
+      "B: Write an extensive suite of unit tests that cover all known functionalities and past bugs, ensuring that these issues do not reoccur.",
+      "C: Use symbolic execution to explore various paths in the application's code, aiming to find bugs that would be difficult to trigger through random testing.",
+      "D: Manually review the source code line by line, relying on expert knowledge to identify potential security vulnerabilities."
+    ],
+    "answer": "AC",
+    "topics": [
+      "ApplicationSecurity",
+      "PenTest"
+    ],
+    "keyword": "bug-finding"
+  },
+  {
+    "id": "df83f007-e2ef-43b6-b6be-c39c5dd79185",
+    "source": "owasp_wstg",
+    "question": "A web application has been reported to experience issues with its handling of HTTP requests. You have been tasked to evaluate the application's security measures against HTTP splitting and smuggling attacks. Based on your assessment, which of the following measures would be most effective in preventing such attacks?",
+    "choices": [
+      "A: Implementing strict input sanitization to prevent the insertion of control characters like CR and LF into HTTP headers.",
+      "B: Enabling compression on all HTTP responses to minimize the attack surface.",
+      "C: Using a static response header configuration that defines a strict Content Security Policy.",
+      "D: Understanding the parsing behavior of different HTTP agents involved and ensuring consistent interpretation."
+    ],
+    "answer": "AD",
+    "topics": [
+      "WebSecurity",
+      "PenTest"
+    ],
+    "keyword": "HTTP Splitting"
+  },
+  {
+    "id": "7a0b7013-e5cd-4950-b53f-0ea5c5b022f0",
+    "source": "cs161_textbook",
+    "question": "In the design of DNSSEC where name servers sign records with their private key, which of the following would be an effective countermeasure against the risk of malicious name servers providing valid signatures on malicious records?",
+    "choices": [
+      "A: Implement a whitelist of trusted name servers and only accept records from those on the list.",
+      "B: Establish a hierarchical trust model where the authenticity of a name server's key is verified by a higher authority.",
+      "C: Encrypt the records with symmetric encryption before sending them to ensure that only trusted resolvers can read them.",
+      "D: Increase the frequency of key rotation for name servers to limit the time window for potential malicious activity."
+    ],
+    "answer": "B",
+    "topics": [
+      "SystemSecurity"
+    ],
+    "keyword": "Countermeasure"
+  },
+  {
+    "id": "e248bc9c-8c65-46ab-ae4c-96ecacc896c9",
+    "source": "cs161_textbook",
+    "question": "Consider a stateful packet filter with the following ruleset: \n1. allow tcp (* : *) → (10.0.0.1:80)\n2. drop (*) (* : *) → (* : *)\nWhich of the following traffic patterns would be allowed by this packet filter?",
+    "choices": [
+      "A: A TCP connection from any IP to port 80 on machine 10.0.0.1",
+      "B: A UDP connection from IP 192.168.1.10 to port 80 on machine 10.0.0.1",
+      "C: A TCP connection from IP 172.16.0.4 to port 443 on machine 10.0.0.1",
+      "D: Any connection initiated by machine 10.0.0.1"
+    ],
+    "answer": "A",
+    "topics": [
+      "WebSecurity"
+    ],
+    "keyword": "StatefulPacketFilters"
+  }
+]

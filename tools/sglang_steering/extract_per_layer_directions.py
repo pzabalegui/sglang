@@ -86,7 +86,7 @@ def send_prompt(url: str, prompt: str, max_tokens: int = 1) -> str:
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
         "temperature": 0.0,
-        # NOTE: Run server with --steering-scale 0.0 for clean activations
+        "steering_enabled": False,  # Disable steering for clean activation capture
     }
     try:
         resp = requests.post(f"{url}/v1/chat/completions", json=payload, timeout=120)
@@ -321,6 +321,15 @@ def main():
             # Vh: [min(n_harm, hidden_size), hidden_size] — top singular vectors
             n_sv = min(k, Vh.shape[0])
             dirs_k = F.normalize(Vh[:n_sv], dim=1)  # [n_sv, hidden_size]
+
+            # Fix sign ambiguity: ensure each direction has positive projection
+            # along harmful-harmless axis (so clamp_(min=0) works correctly).
+            # Convention: harmful samples should project positively onto the direction.
+            for _ki in range(n_sv):
+                h_proj_mean = (h_acts @ dirs_k[_ki]).mean().item()
+                hl_proj_mean = (hl_acts @ dirs_k[_ki]).mean().item()
+                if h_proj_mean < hl_proj_mean:
+                    dirs_k[_ki] = -dirs_k[_ki]  # flip to match convention
 
             # Store directions
             per_layer_directions[layer, :n_sv] = dirs_k

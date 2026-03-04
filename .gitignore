@@ -57,3 +57,12 @@ logs/
 tmp/
 temp/
 *.tmp
+
+# LaTeX build artifacts
+*.aux
+*.out
+*.toc
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+docs/*.log

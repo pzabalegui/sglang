@@ -13,11 +13,53 @@
 # --disable-overlap-schedule is REQUIRED: otherwise steering sees partial TP shards
 # --mem-fraction-static 0.82 leaves headroom for CUDA graph capture on H100 80GB
 
-DAS_VERSION="${DAS_VERSION:-v3}"
+DAS_VERSION="${DAS_VERSION:-v4}"
 
 source /opt/sglang_env/bin/activate
 
-if [ "$DAS_VERSION" = "v3" ]; then
+if [ "$DAS_VERSION" = "v4" ]; then
+  echo "=== DAS v4: Momentum-adaptive decode steering (CUDA graphs) ==="
+  echo "    Prefill: v2 attn+MLP steering. Decode: EMA momentum + sigmoid adaptive scale."
+  echo "    All ops in-place on pre-allocated buffers → captured in CUDA graphs."
+  python -m sglang.launch_server \
+    --model-path /tmp/GLM-4.7-FP8 \
+    --trust-remote-code --tp 4 \
+    --host 0.0.0.0 --port 8000 \
+    --disable-overlap-schedule \
+    --mem-fraction-static 0.82 \
+    --cuda-graph-max-bs 48 \
+    --steering-vector-path /tmp/refusal_direction_fp8_L47.pt \
+    --steering-per-layer-path /tmp/refusal_directions_per_layer_92layers.pt \
+    --steering-scale 0.0 \
+    --steering-attn-scale 2.0 \
+    --steering-mlp-scale 1.0 \
+    --steering-kernel trapezoidal \
+    --steering-trap-start 30 \
+    --steering-trap-end 65 \
+    --steering-trap-ramp 5 \
+    --steering-decode-scale 2.0 \
+    2>&1 | tee /tmp/sglang_server.log
+elif [ "$DAS_VERSION" = "v4-eager" ]; then
+  echo "=== DAS v4-eager: Momentum-adaptive decode (no CUDA graphs, for debugging) ==="
+  python -m sglang.launch_server \
+    --model-path /tmp/GLM-4.7-FP8 \
+    --trust-remote-code --tp 4 \
+    --host 0.0.0.0 --port 8000 \
+    --disable-overlap-schedule \
+    --disable-cuda-graph \
+    --mem-fraction-static 0.82 \
+    --steering-vector-path /tmp/refusal_direction_fp8_L47.pt \
+    --steering-per-layer-path /tmp/refusal_directions_per_layer_92layers.pt \
+    --steering-scale 0.0 \
+    --steering-attn-scale 2.0 \
+    --steering-mlp-scale 1.0 \
+    --steering-kernel trapezoidal \
+    --steering-trap-start 30 \
+    --steering-trap-end 65 \
+    --steering-trap-ramp 5 \
+    --steering-decode-scale 2.0 \
+    2>&1 | tee /tmp/sglang_server.log
+elif [ "$DAS_VERSION" = "v3" ]; then
   echo "=== DAS v3: SVD multi-vector + multi-layer decode ==="
   python -m sglang.launch_server \
     --model-path /tmp/GLM-4.7-FP8 \

@@ -1,0 +1,349 @@
+{
+  "timestamp": "2026-02-02T14:58:17.338262",
+  "base_model": "zai-org/GLM-4.7-Flash",
+  "abliterated_model": "huihui-ai/Huihui-GLM-4.7-Flash-abliterated",
+  "total_tensors": 9703,
+  "modified_tensors": 3151,
+  "total_params": 31221488576,
+  "modified_params": 10140647424,
+  "modification_ratio": 0.3247970512141157,
+  "modified_layers": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31,
+    32,
+    33,
+    34,
+    35,
+    36,
+    37,
+    38,
+    39,
+    40,
+    41,
+    42,
+    43,
+    44,
+    45,
+    46,
+    47
+  ],
+  "n_layers_total": 48,
+  "weight_types_modified": {
+    "down_proj": 3056,
+    "o_proj": 48,
+    "gate.weight": 47
+  },
+  "inferred_technique": "ORTOGONALIZACI\u00d3N GLOBAL (todas las capas, down_proj/o_proj)",
+  "top_modified": [
+    {
+      "name": "model.layers.26.mlp.experts.9.down_proj.weight",
+      "shape": [
+        2048,
+        1536
+      ],
+      "params": 3145728,
+      "frob_base": 40.750186920166016,
+      "frob_diff": 1.8194020986557007,
+      "rel_change": 0.04464769946258417,
+      "max_diff": 0.0712890625,
+      "is_modified": true,
+      "layer": 26
+    },
+    {
+      "name": "model.layers.32.mlp.experts.21.down_proj.weight",
+      "shape": [
+        2048,
+        1536
+      ],
+      "params": 3145728,
+      "frob_base": 41.32872772216797,
+      "frob_diff": 1.7296019792556763,
+      "rel_change": 0.04184987234262112,
+      "max_diff": 0.052734375,
+      "is_modified": true,
+      "layer": 32
+    },
+    {
+      "name": "model.layers.23.mlp.experts.11.down_proj.weight",
+      "shape": [
+        2048,
+        1536
+      ],
+      "params": 3145728,
+      "frob_base": 40.483158111572266,
+      "frob_diff": 1.5727559328079224,
+      "rel_change": 0.03884963540822039,
+      "max_diff": 0.06201171875,
+      "is_modified": true,
+      "layer": 23
+    },
+    {
+      "name": "model.layers.24.mlp.experts.24.down_proj.weight",
+      "shape": [
+        2048,
+        1536
+      ],
+      "params": 3145728,
+      "frob_base": 40.14112854003906,
+      "frob_diff": 1.5540380477905273,
+      "rel_change": 0.038714358671815635,
+      "max_diff": 0.1015625,
+      "is_modified": true,
+      "layer": 24
+    },
+    {
+      "name": "model.layers.25.mlp.shared_experts.down_proj.weight",
+      "shape": [
+        2048,
+        1536
+      ],
+      "params": 3145728,
+      "frob_base": 36.36933517456055,
+      "frob_diff": 1.4079982042312622,
+      "rel_change": 0.03871388348105198,
+      "max_diff": 0.2294921875,
+      "is_modified": true,
+      "layer": 25
+    },
+    {
+      "name": "model.layers.25.mlp.experts.2.down_proj.weight",
+      "shape": [
+        2048,
+        1536
+      ],
+      "params": 3145728,
+      "frob_base": 41.61947250366211,
+      "frob_diff": 1.6093734502792358,
+      "rel_change": 0.03866876136254794,
+      "max_diff": 0.08984375,
+      "is_modified": true,
+      "layer": 25
+    },
+    {
+      "name": "model.layers.26.mlp.gate.weight",
+      "shape": [
+        64,
+        2048
+      ],
+      "params": 131072,
+      "frob_base": 21.270076751708984,
+      "frob_diff": 0.8137178421020508,
+      "rel_change": 0.03825646007773202,
+      "max_diff": 0.05126953125,
+      "is_modified": true,
+      "layer": 26
+    },
+    {
+      "name": "model.layers.27.mlp.shared_experts.down_proj.weight",
+      "shape": [
+        2048,
+        1536
+      ],
+      "params": 3145728,
+      "frob_base": 36.831153869628906,
+      "frob_diff": 1.3874140977859497,
+      "rel_change": 0.03766958001633547,
+      "max_diff": 0.2099609375,
+      "is_modified": true,
+      "layer": 27
+    },
+    {
+      "name": "model.layers.22.mlp.shared_experts.down_proj.weight",
+      "shape": [
+        2048,
+        1536
+      ],
+      "params": 3145728,
+      "frob_base": 36.41615676879883,
+      "frob_diff": 1.366241693496704,
+      "rel_change": 0.037517459686116375,
+      "max_diff": 0.283203125,
+      "is_modified": true,
+      "layer": 22
+    },
+    {
+      "name": "model.layers.21.mlp.experts.42.down_proj.weight",
+      "shape": [
+        2048,
+        1536
+      ],
+      "params": 3145728,
+      "frob_base": 40.181095123291016,
+      "frob_diff": 1.5042691230773926,
+      "rel_change": 0.03743723555721211,
+      "max_diff": 0.0654296875,
+      "is_modified": true,
+      "layer": 21
+    },
+    {
+      "name": "model.layers.21.mlp.shared_experts.down_proj.weight",
+      "shape": [
+        2048,
+        1536
+      ],
+      "params": 3145728,
+      "frob_base": 37.38007354736328,
+      "frob_diff": 1.3936989307403564,
+      "rel_change": 0.037284542230085184,
+      "max_diff": 0.201171875,
+      "is_modified": true,
+      "layer": 21
+    },
+    {
+      "name": "model.layers.26.mlp.shared_experts.down_proj.weight",
+      "shape": [
+        2048,
+        1536
+      ],
+      "params": 3145728,
+      "frob_base": 37.304046630859375,
+      "frob_diff": 1.3415327072143555,
+      "rel_change": 0.03596212283587987,
+      "max_diff": 0.154296875,
+      "is_modified": true,
+      "layer": 26
+    },
+    {
+      "name": "model.layers.22.mlp.experts.32.down_proj.weight",
+      "shape": [
+        2048,
+        1536
+      ],
+      "params": 3145728,
+      "frob_base": 40.07586669921875,
+      "frob_diff": 1.4340121746063232,
+      "rel_change": 0.03578243698056512,
+      "max_diff": 0.060546875,
+      "is_modified": true,
+      "layer": 22
+    },
+    {
+      "name": "model.layers.24.mlp.gate.weight",
+      "shape": [
+        64,
+        2048
+      ],
+      "params": 131072,
+      "frob_base": 20.6385440826416,
+      "frob_diff": 0.7377851605415344,
+      "rel_change": 0.03574792667483077,
+      "max_diff": 0.0556640625,
+      "is_modified": true,
+      "layer": 24
+    },
+    {
+      "name": "model.layers.22.mlp.experts.18.down_proj.weight",
+      "shape": [
+        2048,
+        1536
+      ],
+      "params": 3145728,
+      "frob_base": 39.861148834228516,
+      "frob_diff": 1.4242138862609863,
+      "rel_change": 0.035729373786588484,
+      "max_diff": 0.04150390625,
+      "is_modified": true,
+      "layer": 22
+    },
+    {
+      "name": "model.layers.26.mlp.experts.7.down_proj.weight",
+      "shape": [
+        2048,
+        1536
+      ],
+      "params": 3145728,
+      "frob_base": 40.40290451049805,
+      "frob_diff": 1.4425537586212158,
+      "rel_change": 0.035704209291349126,
+      "max_diff": 0.05712890625,
+      "is_modified": true,
+      "layer": 26
+    },
+    {
+      "name": "model.layers.22.mlp.experts.39.down_proj.weight",
+      "shape": [
+        2048,
+        1536
+      ],
+      "params": 3145728,
+      "frob_base": 39.35917663574219,
+      "frob_diff": 1.4042006731033325,
+      "rel_change": 0.035676576420762156,
+      "max_diff": 0.060791015625,
+      "is_modified": true,
+      "layer": 22
+    },
+    {
+      "name": "model.layers.24.mlp.shared_experts.down_proj.weight",
+      "shape": [
+        2048,
+        1536
+      ],
+      "params": 3145728,
+      "frob_base": 37.077056884765625,
+      "frob_diff": 1.311086654663086,
+      "rel_change": 0.03536113070511243,
+      "max_diff": 0.1669921875,
+      "is_modified": true,
+      "layer": 24
+    },
+    {
+      "name": "model.layers.22.mlp.experts.40.down_proj.weight",
+      "shape": [
+        2048,
+        1536
+      ],
+      "params": 3145728,
+      "frob_base": 39.960289001464844,
+      "frob_diff": 1.3830060958862305,
+      "rel_change": 0.0346095118540192,
+      "max_diff": 0.07177734375,
+      "is_modified": true,
+      "layer": 22
+    },
+    {
+      "name": "model.layers.20.mlp.shared_experts.down_proj.weight",
+      "shape": [
+        2048,
+        1536
+      ],
+      "params": 3145728,
+      "frob_base": 37.30514144897461,
+      "frob_diff": 1.2811486721038818,
+      "rel_change": 0.03434241561196644,
+      "max_diff": 0.150390625,
+      "is_modified": true,
+      "layer": 20
+    }
+  ]
+}

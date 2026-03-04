@@ -230,6 +230,7 @@ class GenerateReqInput(BaseReq, APIServingTimingMixin):
     # Set via {"steering": {"enabled": true/false, "scale": 6.0}} in the curl body
     steering_enabled: Optional[bool] = None
     steering_scale: Optional[float] = None
+    steering_decode_scale: Optional[float] = None
 
     # For disaggregated inference
     bootstrap_host: Optional[Union[List[str], str]] = None
@@ -287,6 +288,7 @@ class GenerateReqInput(BaseReq, APIServingTimingMixin):
     # Per-request steering override (None = usar config global del servidor)
     steering_enabled: Optional[bool] = None
     steering_scale: Optional[float] = None
+    steering_decode_scale: Optional[float] = None
 
     def contains_mm_input(self) -> bool:
         return (
@@ -783,6 +785,7 @@ class TokenizedGenerateReqInput(BaseReq):
     # Per-request steering override
     steering_enabled: Optional[bool] = None
     steering_scale: Optional[float] = None
+    steering_decode_scale: Optional[float] = None
 
 
 @dataclass
