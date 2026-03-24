@@ -615,6 +615,8 @@ class ServerArgs:
     steering_trap_start: int = 30
     steering_trap_end: int = 65
     steering_trap_ramp: int = 5
+    abliteration_vector_path: Optional[str] = None
+    abliteration_rank: int = 1
     enable_mixed_chunk: bool = False
     enable_dp_attention: bool = False
     enable_dp_lm_head: bool = False
@@ -5260,6 +5262,18 @@ class ServerArgs:
             type=int,
             default=5,
             help="DAS v2: trapezoidal kernel ramp width",
+        )
+        parser.add_argument(
+            "--abliteration-vector-path",
+            type=str,
+            default=None,
+            help="Path to abliteration direction vector (.pt). Enables inline refusal removal.",
+        )
+        parser.add_argument(
+            "--abliteration-rank",
+            type=int,
+            default=1,
+            help="Rank k for multi-rank abliteration (default 1).",
         )
 
     @classmethod

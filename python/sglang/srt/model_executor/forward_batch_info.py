@@ -496,7 +496,7 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
     # Steering vector configuration for abliteration
     steering_config: Optional[SteeringConfig] = None
 
-    # Per-request steering toggle: True when ALL requests have steering_enabled=False
+    # Per-request steering toggle: False = abliteration active (mask controls per-request)
     steering_disabled: bool = False
     # Per-request decode scale override (None = use server default)
     steering_decode_scale_override: float = None
@@ -563,12 +563,12 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             _all_off = True
             for req in batch.reqs:
                 se = getattr(req, "steering_enabled", None)
-                if se is False:
-                    _mask_vals.append(0.0)
-                    _any_off = True
-                else:
+                if se is True:
                     _mask_vals.append(1.0)
                     _all_off = False
+                else:
+                    _mask_vals.append(0.0)
+                    _any_off = True
                 # Per-request decode scale override
                 _ds = getattr(req, "steering_decode_scale", None)
                 if _ds is not None:
@@ -577,11 +577,10 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
                     if ret.steering_decode_scale_values is None:
                         ret.steering_decode_scale_values = [None] * len(batch.reqs)
                     ret.steering_decode_scale_values[len(_mask_vals) - 1] = float(_ds)
-            # Full disable only when ALL requests have steering off
-            ret.steering_disabled = _all_off
-            # Per-request mask (None if all ON for backward compat)
-            if _any_off:
-                ret.steering_mask_values = _mask_vals
+            # Always emit the mask so CUDA-graph-captured abliteration ops
+            # are zeroed out (mask=0.0) for OFF requests and active (mask=1.0) for ON requests.
+            # steering_disabled stays False so the graph always includes abliteration ops.
+            ret.steering_mask_values = _mask_vals
 
         # Copy steering config from model runner if available
         # Copy steering config from model runner, with per-request override
