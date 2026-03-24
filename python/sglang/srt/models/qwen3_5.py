@@ -559,29 +559,6 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
                 forward_batch,
             )
 
-        # Inline abliteration: remove rank-k directions from out_proj output
-        if ablit_ctx is not None:
-            _layer_id = self.layer_id
-            _ablit_dirs = ablit_ctx["dirs"][_layer_id]  # [k, hid]
-            _ablit_k = ablit_ctx["rank"]
-            if ablit_ctx["is_prefill"]:
-                for _ki in range(_ablit_k):
-                    _d = _ablit_dirs[_ki]
-                    _aproj = (hidden_states * _d).sum(dim=-1, keepdim=True)
-                    hidden_states = hidden_states - _aproj * _d
-            else:
-                _bs = hidden_states.shape[0]
-                _atmp = ablit_ctx["tmp"][:_bs]
-                _ap = ablit_ctx["proj"][:_bs]
-                _amask = ablit_ctx["mask"][:_bs]
-                for _ki in range(_ablit_k):
-                    _d = _ablit_dirs[_ki]
-                    torch.mul(hidden_states, _d, out=_atmp)
-                    _ap.copy_(_atmp.sum(dim=-1, keepdim=True))
-                    torch.mul(_ap, _d, out=_atmp)
-                    _atmp.mul_(_amask)
-                    hidden_states.sub_(_atmp)
-
         # Sub-layer capture: post-attention (before steering, raw δ_attn)
         _maybe_capture_sublayer(hidden_states, self.layer_id, "post_attn", forward_batch)
 
@@ -619,13 +596,7 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
         hidden_states, residual = self.layer_communicator.prepare_mlp(
             hidden_states, residual, forward_batch
         )
-
-        use_reduce_scatter = self.layer_communicator.should_use_reduce_scatter(
-            forward_batch
-        )
-        hidden_states = self.mlp(hidden_states, forward_batch, use_reduce_scatter)
-
-        # Inline abliteration: remove rank-k directions from down_proj output
+        # Inline abliteration: remove rank-k directions from residual (TP-safe)
         if ablit_ctx is not None:
             _layer_id = self.layer_id
             _ablit_dirs = ablit_ctx["dirs"][_layer_id]  # [k, hid]
@@ -633,20 +604,26 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
             if ablit_ctx["is_prefill"]:
                 for _ki in range(_ablit_k):
                     _d = _ablit_dirs[_ki]
-                    _aproj = (hidden_states * _d).sum(dim=-1, keepdim=True)
-                    hidden_states = hidden_states - _aproj * _d
+                    _aproj = (residual * _d).sum(dim=-1, keepdim=True)
+                    residual = residual - _aproj * _d
             else:
-                _bs = hidden_states.shape[0]
+                _bs = residual.shape[0]
                 _atmp = ablit_ctx["tmp"][:_bs]
                 _ap = ablit_ctx["proj"][:_bs]
                 _amask = ablit_ctx["mask"][:_bs]
                 for _ki in range(_ablit_k):
                     _d = _ablit_dirs[_ki]
-                    torch.mul(hidden_states, _d, out=_atmp)
+                    torch.mul(residual, _d, out=_atmp)
                     _ap.copy_(_atmp.sum(dim=-1, keepdim=True))
                     torch.mul(_ap, _d, out=_atmp)
                     _atmp.mul_(_amask)
-                    hidden_states.sub_(_atmp)
+                    residual.sub_(_atmp)
+
+
+        use_reduce_scatter = self.layer_communicator.should_use_reduce_scatter(
+            forward_batch
+        )
+        hidden_states = self.mlp(hidden_states, forward_batch, use_reduce_scatter)
 
         # Sub-layer capture: post-MLP (before steering, raw δ_mlp)
         _maybe_capture_sublayer(hidden_states, self.layer_id, "post_mlp", forward_batch)
@@ -902,29 +879,6 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
                 forward_batch=forward_batch,
             )
 
-        # Inline abliteration: remove rank-k directions from o_proj output
-        if ablit_ctx is not None:
-            _layer_id = self.layer_id
-            _ablit_dirs = ablit_ctx["dirs"][_layer_id]  # [k, hid]
-            _ablit_k = ablit_ctx["rank"]
-            if ablit_ctx["is_prefill"]:
-                for _ki in range(_ablit_k):
-                    _d = _ablit_dirs[_ki]
-                    _aproj = (hidden_states * _d).sum(dim=-1, keepdim=True)
-                    hidden_states = hidden_states - _aproj * _d
-            else:
-                _bs = hidden_states.shape[0]
-                _atmp = ablit_ctx["tmp"][:_bs]
-                _ap = ablit_ctx["proj"][:_bs]
-                _amask = ablit_ctx["mask"][:_bs]
-                for _ki in range(_ablit_k):
-                    _d = _ablit_dirs[_ki]
-                    torch.mul(hidden_states, _d, out=_atmp)
-                    _ap.copy_(_atmp.sum(dim=-1, keepdim=True))
-                    torch.mul(_ap, _d, out=_atmp)
-                    _atmp.mul_(_amask)
-                    hidden_states.sub_(_atmp)
-
         # Sub-layer capture: post-attention (before steering, raw δ_attn)
         _maybe_capture_sublayer(hidden_states, self.layer_id, "post_attn", forward_batch)
 
@@ -962,12 +916,7 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
         hidden_states, residual = self.layer_communicator.prepare_mlp(
             hidden_states, residual, forward_batch
         )
-        use_reduce_scatter = self.layer_communicator.should_use_reduce_scatter(
-            forward_batch
-        )
-        hidden_states = self.mlp(hidden_states, forward_batch, use_reduce_scatter)
-
-        # Inline abliteration: remove rank-k directions from down_proj output
+        # Inline abliteration: remove rank-k directions from residual (TP-safe)
         if ablit_ctx is not None:
             _layer_id = self.layer_id
             _ablit_dirs = ablit_ctx["dirs"][_layer_id]  # [k, hid]
@@ -975,20 +924,25 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
             if ablit_ctx["is_prefill"]:
                 for _ki in range(_ablit_k):
                     _d = _ablit_dirs[_ki]
-                    _aproj = (hidden_states * _d).sum(dim=-1, keepdim=True)
-                    hidden_states = hidden_states - _aproj * _d
+                    _aproj = (residual * _d).sum(dim=-1, keepdim=True)
+                    residual = residual - _aproj * _d
             else:
-                _bs = hidden_states.shape[0]
+                _bs = residual.shape[0]
                 _atmp = ablit_ctx["tmp"][:_bs]
                 _ap = ablit_ctx["proj"][:_bs]
                 _amask = ablit_ctx["mask"][:_bs]
                 for _ki in range(_ablit_k):
                     _d = _ablit_dirs[_ki]
-                    torch.mul(hidden_states, _d, out=_atmp)
+                    torch.mul(residual, _d, out=_atmp)
                     _ap.copy_(_atmp.sum(dim=-1, keepdim=True))
                     torch.mul(_ap, _d, out=_atmp)
                     _atmp.mul_(_amask)
-                    hidden_states.sub_(_atmp)
+                    residual.sub_(_atmp)
+
+        use_reduce_scatter = self.layer_communicator.should_use_reduce_scatter(
+            forward_batch
+        )
+        hidden_states = self.mlp(hidden_states, forward_batch, use_reduce_scatter)
 
         # Sub-layer capture: post-MLP (before steering, raw δ_mlp)
         _maybe_capture_sublayer(hidden_states, self.layer_id, "post_mlp", forward_batch)
