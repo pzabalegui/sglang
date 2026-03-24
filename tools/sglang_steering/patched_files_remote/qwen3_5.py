@@ -559,21 +559,28 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
                 forward_batch,
             )
 
-        # Inline abliteration: remove d̂ from out_proj output
+        # Inline abliteration: remove rank-k directions from out_proj output
         if ablit_ctx is not None:
-            _d = ablit_ctx["dir"]
+            _layer_id = self.layer_id
+            _ablit_dirs = ablit_ctx["dirs"][_layer_id]  # [k, hid]
+            _ablit_k = ablit_ctx["rank"]
             if ablit_ctx["is_prefill"]:
-                _aproj = (hidden_states * _d).sum(dim=-1, keepdim=True)
-                hidden_states = hidden_states - _aproj * _d
+                for _ki in range(_ablit_k):
+                    _d = _ablit_dirs[_ki]
+                    _aproj = (hidden_states * _d).sum(dim=-1, keepdim=True)
+                    hidden_states = hidden_states - _aproj * _d
             else:
                 _bs = hidden_states.shape[0]
                 _atmp = ablit_ctx["tmp"][:_bs]
                 _ap = ablit_ctx["proj"][:_bs]
-                torch.mul(hidden_states, _d, out=_atmp)
-                _ap.copy_(_atmp.sum(dim=-1, keepdim=True))
-                torch.mul(_ap, _d, out=_atmp)
-                _atmp.mul_(ablit_ctx["mask"][:_bs])
-                hidden_states.sub_(_atmp)
+                _amask = ablit_ctx["mask"][:_bs]
+                for _ki in range(_ablit_k):
+                    _d = _ablit_dirs[_ki]
+                    torch.mul(hidden_states, _d, out=_atmp)
+                    _ap.copy_(_atmp.sum(dim=-1, keepdim=True))
+                    torch.mul(_ap, _d, out=_atmp)
+                    _atmp.mul_(_amask)
+                    hidden_states.sub_(_atmp)
 
         # Sub-layer capture: post-attention (before steering, raw δ_attn)
         _maybe_capture_sublayer(hidden_states, self.layer_id, "post_attn", forward_batch)
@@ -618,21 +625,28 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
         )
         hidden_states = self.mlp(hidden_states, forward_batch, use_reduce_scatter)
 
-        # Inline abliteration: remove d̂ from down_proj output
+        # Inline abliteration: remove rank-k directions from down_proj output
         if ablit_ctx is not None:
-            _d = ablit_ctx["dir"]
+            _layer_id = self.layer_id
+            _ablit_dirs = ablit_ctx["dirs"][_layer_id]  # [k, hid]
+            _ablit_k = ablit_ctx["rank"]
             if ablit_ctx["is_prefill"]:
-                _aproj = (hidden_states * _d).sum(dim=-1, keepdim=True)
-                hidden_states = hidden_states - _aproj * _d
+                for _ki in range(_ablit_k):
+                    _d = _ablit_dirs[_ki]
+                    _aproj = (hidden_states * _d).sum(dim=-1, keepdim=True)
+                    hidden_states = hidden_states - _aproj * _d
             else:
                 _bs = hidden_states.shape[0]
                 _atmp = ablit_ctx["tmp"][:_bs]
                 _ap = ablit_ctx["proj"][:_bs]
-                torch.mul(hidden_states, _d, out=_atmp)
-                _ap.copy_(_atmp.sum(dim=-1, keepdim=True))
-                torch.mul(_ap, _d, out=_atmp)
-                _atmp.mul_(ablit_ctx["mask"][:_bs])
-                hidden_states.sub_(_atmp)
+                _amask = ablit_ctx["mask"][:_bs]
+                for _ki in range(_ablit_k):
+                    _d = _ablit_dirs[_ki]
+                    torch.mul(hidden_states, _d, out=_atmp)
+                    _ap.copy_(_atmp.sum(dim=-1, keepdim=True))
+                    torch.mul(_ap, _d, out=_atmp)
+                    _atmp.mul_(_amask)
+                    hidden_states.sub_(_atmp)
 
         # Sub-layer capture: post-MLP (before steering, raw δ_mlp)
         _maybe_capture_sublayer(hidden_states, self.layer_id, "post_mlp", forward_batch)
@@ -888,21 +902,28 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
                 forward_batch=forward_batch,
             )
 
-        # Inline abliteration: remove d̂ from o_proj output
+        # Inline abliteration: remove rank-k directions from o_proj output
         if ablit_ctx is not None:
-            _d = ablit_ctx["dir"]
+            _layer_id = self.layer_id
+            _ablit_dirs = ablit_ctx["dirs"][_layer_id]  # [k, hid]
+            _ablit_k = ablit_ctx["rank"]
             if ablit_ctx["is_prefill"]:
-                _aproj = (hidden_states * _d).sum(dim=-1, keepdim=True)
-                hidden_states = hidden_states - _aproj * _d
+                for _ki in range(_ablit_k):
+                    _d = _ablit_dirs[_ki]
+                    _aproj = (hidden_states * _d).sum(dim=-1, keepdim=True)
+                    hidden_states = hidden_states - _aproj * _d
             else:
                 _bs = hidden_states.shape[0]
                 _atmp = ablit_ctx["tmp"][:_bs]
                 _ap = ablit_ctx["proj"][:_bs]
-                torch.mul(hidden_states, _d, out=_atmp)
-                _ap.copy_(_atmp.sum(dim=-1, keepdim=True))
-                torch.mul(_ap, _d, out=_atmp)
-                _atmp.mul_(ablit_ctx["mask"][:_bs])
-                hidden_states.sub_(_atmp)
+                _amask = ablit_ctx["mask"][:_bs]
+                for _ki in range(_ablit_k):
+                    _d = _ablit_dirs[_ki]
+                    torch.mul(hidden_states, _d, out=_atmp)
+                    _ap.copy_(_atmp.sum(dim=-1, keepdim=True))
+                    torch.mul(_ap, _d, out=_atmp)
+                    _atmp.mul_(_amask)
+                    hidden_states.sub_(_atmp)
 
         # Sub-layer capture: post-attention (before steering, raw δ_attn)
         _maybe_capture_sublayer(hidden_states, self.layer_id, "post_attn", forward_batch)
@@ -946,21 +967,28 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
         )
         hidden_states = self.mlp(hidden_states, forward_batch, use_reduce_scatter)
 
-        # Inline abliteration: remove d̂ from down_proj output
+        # Inline abliteration: remove rank-k directions from down_proj output
         if ablit_ctx is not None:
-            _d = ablit_ctx["dir"]
+            _layer_id = self.layer_id
+            _ablit_dirs = ablit_ctx["dirs"][_layer_id]  # [k, hid]
+            _ablit_k = ablit_ctx["rank"]
             if ablit_ctx["is_prefill"]:
-                _aproj = (hidden_states * _d).sum(dim=-1, keepdim=True)
-                hidden_states = hidden_states - _aproj * _d
+                for _ki in range(_ablit_k):
+                    _d = _ablit_dirs[_ki]
+                    _aproj = (hidden_states * _d).sum(dim=-1, keepdim=True)
+                    hidden_states = hidden_states - _aproj * _d
             else:
                 _bs = hidden_states.shape[0]
                 _atmp = ablit_ctx["tmp"][:_bs]
                 _ap = ablit_ctx["proj"][:_bs]
-                torch.mul(hidden_states, _d, out=_atmp)
-                _ap.copy_(_atmp.sum(dim=-1, keepdim=True))
-                torch.mul(_ap, _d, out=_atmp)
-                _atmp.mul_(ablit_ctx["mask"][:_bs])
-                hidden_states.sub_(_atmp)
+                _amask = ablit_ctx["mask"][:_bs]
+                for _ki in range(_ablit_k):
+                    _d = _ablit_dirs[_ki]
+                    torch.mul(hidden_states, _d, out=_atmp)
+                    _ap.copy_(_atmp.sum(dim=-1, keepdim=True))
+                    torch.mul(_ap, _d, out=_atmp)
+                    _atmp.mul_(_amask)
+                    hidden_states.sub_(_atmp)
 
         # Sub-layer capture: post-MLP (before steering, raw δ_mlp)
         _maybe_capture_sublayer(hidden_states, self.layer_id, "post_mlp", forward_batch)
@@ -1178,7 +1206,8 @@ class Qwen3_5ForCausalLM(nn.Module):
         _ablit_ctx = None
         if _abliteration:
             _ablit_ctx = {
-                "dir": self._ablit_dir,
+                "dirs": self._ablit_dirs,       # [n_layers, k, hid]
+                "rank": self._ablit_rank,        # int
                 "tmp": self._ablit_tmp,
                 "proj": self._ablit_proj,
                 "mask": self._steering_mask,
@@ -2061,18 +2090,44 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
         if getattr(args, "steering_diagnostics", False):
             _diag_init(n_layers)
 
-        # --- Inline Abliteration (weight-equivalent, on-demand) ---
+        # --- Inline Abliteration v2: multi-rank per-layer (weight-equivalent, on-demand) ---
         ablit_path = getattr(args, "abliteration_vector_path", None)
+        ablit_rank = int(getattr(args, "abliteration_rank", 1))
         self.model._abliteration_enabled = False
         if ablit_path:
-            ablit_dir = torch.load(ablit_path, map_location="cpu", weights_only=True)
-            if ablit_dir.dim() != 1:
+            ablit_data = torch.load(ablit_path, map_location="cpu", weights_only=True)
+            ablit_data = ablit_data.float()
+
+            if ablit_data.dim() == 1:
+                # Legacy: single global direction [hid] → expand to [n_layers, 1, hid]
+                ablit_data = ablit_data.unsqueeze(0).unsqueeze(0).expand(n_layers, 1, hid).clone()
+                ablit_rank = 1
+            elif ablit_data.dim() == 2:
+                # Per-layer single direction [n_layers, hid] → [n_layers, 1, hid]
+                ablit_data = ablit_data.unsqueeze(1)
+                ablit_rank = 1
+            elif ablit_data.dim() == 3:
+                # Multi-rank per-layer [n_layers, k, hid]
+                ablit_rank = min(ablit_rank, ablit_data.shape[1])
+                ablit_data = ablit_data[:, :ablit_rank, :]
+            else:
                 raise ValueError(
-                    f"Abliteration vector must be 1-D, got shape {ablit_dir.shape}"
+                    f"Abliteration vector must be 1-D, 2-D, or 3-D, got shape {ablit_data.shape}"
                 )
-            ablit_dir = ablit_dir.float()
-            ablit_dir = ablit_dir / ablit_dir.norm()
-            self.model.register_buffer("_ablit_dir", ablit_dir.bfloat16())
+
+            assert ablit_data.shape[0] == n_layers, (
+                f"Abliteration dirs have {ablit_data.shape[0]} layers, expected {n_layers}"
+            )
+            assert ablit_data.shape[2] == hid, (
+                f"Abliteration dirs have dim {ablit_data.shape[2]}, expected {hid}"
+            )
+
+            # Normalize each direction to unit vector
+            norms = ablit_data.norm(dim=-1, keepdim=True).clamp(min=1e-10)
+            ablit_data = ablit_data / norms
+
+            self.model.register_buffer("_ablit_dirs", ablit_data.bfloat16())  # [n_layers, k, hid]
+            self.model._ablit_rank = ablit_rank
 
             # Scratch buffers for CUDA-graph-safe decode abliteration
             max_bs = max(getattr(args, "cuda_graph_max_bs", 128), 512)
@@ -2091,8 +2146,8 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
             self.model._abliteration_enabled = True
             self.model._steering_needs_device_sync = True
             logger.info(
-                f"[abliteration] Inline abliteration enabled: "
-                f"dir shape={list(ablit_dir.shape)}, max_bs={max_bs}, "
+                f"[abliteration] Inline abliteration v2 enabled: "
+                f"rank={ablit_rank}, dirs shape={list(ablit_data.shape)}, max_bs={max_bs}, "
                 f"CUDA-graph safe, per-request toggle via steering_enabled"
             )
 

@@ -29,6 +29,7 @@ ScheduleBatch -> ModelWorkerBatch -> ForwardBatch
 
 from __future__ import annotations
 
+import logging as _logging
 from dataclasses import dataclass
 from enum import IntEnum, auto
 from functools import total_ordering
@@ -45,6 +46,7 @@ from sglang.srt.distributed.parallel_state import (
 from sglang.srt.layers.attention.nsa.utils import NSAContextParallelMetadata
 from sglang.srt.layers.dp_attention import (
     DpPaddingMode,
+    get_attention_cp_size,
     get_attention_dp_rank,
     get_attention_tp_rank,
     get_attention_tp_size,
@@ -56,7 +58,7 @@ from sglang.srt.model_executor.forward_batch_deepseek_mha_mixin import (
 )
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import get_compiler_backend, is_hip, is_npu, support_triton
-import logging as _logging
+
 _steering_logger = _logging.getLogger("sglang.steering")
 from sglang.srt.utils.common import ceil_align
 
@@ -81,6 +83,7 @@ class SteeringConfig:
 
     Formula: h' = h - effective_scale * (h . r_hat) * r_hat
     """
+
     direction: torch.Tensor  # [hidden_size] global direction (v1 compatible)
     scale: float = 1.0
     layers: Optional[List[int]] = None
@@ -139,8 +142,7 @@ def apply_steering(
         return hidden_states
 
     direction = steering_config.direction.to(
-        device=hidden_states.device,
-        dtype=hidden_states.dtype
+        device=hidden_states.device, dtype=hidden_states.dtype
     )
     direction = direction / direction.norm()
 
@@ -161,29 +163,29 @@ def apply_steering_to_residual(
     layer_idx: int,
 ) -> torch.Tensor:
     """Apply steering to the residual stream BEFORE layer computation.
-    
+
     The residual holds the accumulated representation. By removing the
     refusal direction from the residual before prepare_attn, both the
     attention and MLP see cleaned inputs. This approximates orthogonalization.
-    
+
     Formula: res' = res - scale * (res . r_hat) * r_hat
     """
     if steering_config is None:
         return residual
     if not steering_config.should_apply_to_layer(layer_idx):
         return residual
-    
+
     direction = steering_config.direction.to(
         device=residual.device, dtype=residual.dtype
     )
     direction = direction / direction.norm()
-    
+
     # Project residual onto refusal direction
     proj_scalar = (residual * direction).sum(dim=-1, keepdim=True)
-    
+
     # CLAMPED: only steer tokens with positive projection (refusal-aligned)
     proj_scalar = proj_scalar.clamp(min=0)
-    
+
     # Remove the refusal component from residual
     effective_scale = steering_config.get_effective_scale(layer_idx)
     return residual - effective_scale * proj_scalar * direction
@@ -326,7 +328,7 @@ class CaptureHiddenMode(IntEnum):
 
 
 def compute_local_num_token_non_padded(
-    global_num_token_non_padded: torch.Tensor | int,
+    global_num_token_non_padded: torch.Tensor,
     num_tokens_per_dp: int,
 ) -> torch.Tensor:
     """Compute local non-padded token count for this attention-TP rank.
@@ -337,10 +339,6 @@ def compute_local_num_token_non_padded(
     attn_tp_rank = get_attention_tp_rank()
     attn_tp_size = get_attention_tp_size()
     tokens_per_rank = num_tokens_per_dp // attn_tp_size
-
-    # Make sure global_num_token_non_padded is tensor so torch.clamp doesn't break
-    if isinstance(global_num_token_non_padded, int):
-        global_num_token_non_padded = torch.tensor(global_num_token_non_padded)
 
     return torch.clamp(
         global_num_token_non_padded - tokens_per_rank * attn_tp_rank,
@@ -498,10 +496,17 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
     # Steering vector configuration for abliteration
     steering_config: Optional[SteeringConfig] = None
 
-    # Per-request steering toggle: True when steering_enabled=False in request
+    # Per-request steering toggle: False = abliteration active (mask controls per-request)
     steering_disabled: bool = False
     # Per-request decode scale override (None = use server default)
     steering_decode_scale_override: float = None
+    # Per-request decode scale: list of per-request raw scale values (None = default)
+    steering_decode_scale_values: object = None
+    # Per-request steering mask: list of 1.0/0.0 per request in batch (None = all ON)
+    steering_mask_values: object = None
+
+    # For dumper: request IDs for cross-step sequence tracking
+    rids: Optional[List[str]] = None
 
     @classmethod
     def init_new(
@@ -547,19 +552,35 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             tbo_split_seq_index=batch.tbo_split_seq_index,
             dimensions=batch.dimensions,
             return_hidden_states_before_norm=batch.return_hidden_states_before_norm,
+            rids=[req.rid for req in batch.reqs],
         )
         device = model_runner.device
 
         # Per-request steering toggle + decode scale override
         if hasattr(batch, "reqs") and batch.reqs:
+            _mask_vals = []
+            _any_off = False
+            _all_off = True
             for req in batch.reqs:
                 se = getattr(req, "steering_enabled", None)
-                if se is False:
-                    ret.steering_disabled = True
-                # Per-request decode scale override (first non-None wins)
+                if se is True:
+                    _mask_vals.append(1.0)
+                    _all_off = False
+                else:
+                    _mask_vals.append(0.0)
+                    _any_off = True
+                # Per-request decode scale override
                 _ds = getattr(req, "steering_decode_scale", None)
-                if _ds is not None and ret.steering_decode_scale_override is None:
-                    ret.steering_decode_scale_override = float(_ds)
+                if _ds is not None:
+                    if ret.steering_decode_scale_override is None:
+                        ret.steering_decode_scale_override = float(_ds)
+                    if ret.steering_decode_scale_values is None:
+                        ret.steering_decode_scale_values = [None] * len(batch.reqs)
+                    ret.steering_decode_scale_values[len(_mask_vals) - 1] = float(_ds)
+            # Always emit the mask so CUDA-graph-captured abliteration ops
+            # are zeroed out (mask=0.0) for OFF requests and active (mask=1.0) for ON requests.
+            # steering_disabled stays False so the graph always includes abliteration ops.
+            ret.steering_mask_values = _mask_vals
 
         # Copy steering config from model runner if available
         # Copy steering config from model runner, with per-request override
@@ -570,9 +591,15 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             override_scale = None
             if hasattr(batch, "reqs") and batch.reqs:
                 for req in batch.reqs:
-                    if hasattr(req, "steering_enabled") and req.steering_enabled is not None:
+                    if (
+                        hasattr(req, "steering_enabled")
+                        and req.steering_enabled is not None
+                    ):
                         override_enabled = req.steering_enabled
-                    if hasattr(req, "steering_scale") and req.steering_scale is not None:
+                    if (
+                        hasattr(req, "steering_scale")
+                        and req.steering_scale is not None
+                    ):
                         override_scale = req.steering_scale
 
             # Apply overrides if present
@@ -583,8 +610,12 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
                 # Recompute layer_weights if base has Gaussian kernel
                 if base_config.layer_weights is not None:
                     # Scale all layer weights proportionally
-                    scale_ratio = override_scale / max(base_config.layer_weights.values())
-                    new_weights = {l: w * scale_ratio for l, w in base_config.layer_weights.items()}
+                    scale_ratio = override_scale / max(
+                        base_config.layer_weights.values()
+                    )
+                    new_weights = {
+                        l: w * scale_ratio for l, w in base_config.layer_weights.items()
+                    }
                     ret.steering_config = SteeringConfig(
                         direction=base_config.direction,
                         scale=override_scale,
@@ -722,7 +753,7 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             num_tokens_per_dp = self.global_num_tokens_cpu[0]
 
         self.num_token_non_padded = compute_local_num_token_non_padded(
-            global_num_token_non_padded=self.num_token_non_padded_cpu,
+            global_num_token_non_padded=self.num_token_non_padded,
             num_tokens_per_dp=num_tokens_per_dp,
         )
 
@@ -929,6 +960,11 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             # make sure that the padded length is divisible by attn_tp_size because we may need reduce-scatter across attn_tp dim.
             # there is no reduce-scatter in LM logprob, so we do not need to adjust the padded length for logprob
             global_num_tokens[i] = ceil_align(global_num_tokens[i], attn_tp_size)
+
+        # make sure that each rank has the same number of tokens to do collective communication.
+        attn_cp_size = get_attention_cp_size()
+        for i in range(sync_group_size):
+            global_num_tokens[i] = ceil_align(global_num_tokens[i], attn_cp_size)
 
         dp_padding_mode = DpPaddingMode.get_dp_padding_mode(
             self.is_extend_in_batch, global_num_tokens

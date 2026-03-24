@@ -642,6 +642,38 @@ elif [ "$DAS_VERSION" = "ablit-eager" ]; then
     --steering-scale 0.0 \
     --steering-decode-scale 0.0 \
     2>&1 | tee /tmp/sglang_qwen35_server.log
+elif [ "$DAS_VERSION" = "ablit-v2" ]; then
+  echo "=== Abliteration v2: Multi-rank per-layer (Qwen3.5-27B) ==="
+  echo "    Rank-k SVD directions per layer (joint o_proj+down_proj)."
+  echo "    Requires: /tmp/wdiff_rankk_dirs_64layers.pt (run extract_rankk_wdiff_qwen35.py)"
+  python -m sglang.launch_server \
+    --model-path /tmp/Qwen3.5-27B-FP8 \
+    --trust-remote-code --tp 1 \
+    --host 0.0.0.0 --port 8000 \
+    --disable-overlap-schedule \
+    --mem-fraction-static 0.85 \
+    --cuda-graph-max-bs 128 \
+    --abliteration-vector-path /tmp/wdiff_rankk_dirs_64layers.pt \
+    --abliteration-rank 3 \
+    --steering-vector-path /tmp/wdiff_direction_global.pt \
+    --steering-scale 0.0 \
+    --steering-decode-scale 0.0 \
+    2>&1 | tee /tmp/sglang_qwen35_server.log
+elif [ "$DAS_VERSION" = "ablit-v2-eager" ]; then
+  echo "=== Abliteration v2 eager: Multi-rank per-layer, no CUDA graphs ==="
+  python -m sglang.launch_server \
+    --model-path /tmp/Qwen3.5-27B-FP8 \
+    --trust-remote-code --tp 1 \
+    --host 0.0.0.0 --port 8000 \
+    --disable-overlap-schedule \
+    --disable-cuda-graph \
+    --mem-fraction-static 0.85 \
+    --abliteration-vector-path /tmp/wdiff_rankk_dirs_64layers.pt \
+    --abliteration-rank 3 \
+    --steering-vector-path /tmp/wdiff_direction_global.pt \
+    --steering-scale 0.0 \
+    --steering-decode-scale 0.0 \
+    2>&1 | tee /tmp/sglang_qwen35_server.log
 elif [ "$DAS_VERSION" = "no-steering" ]; then
   echo "=== No steering (baseline) ==="
   python -m sglang.launch_server \

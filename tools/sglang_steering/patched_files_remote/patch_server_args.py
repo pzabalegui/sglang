@@ -29,8 +29,9 @@ if ("steering_vector_path" in content and "steering_attn_scale" in content
         and "steering_prefill_mode" in content
         and "steering_diagnostics" in content
         and "steering_attn_per_layer_path" in content
-        and "abliteration_vector_path" in content):
-    print("server_args.py: Already fully patched (v1+v2+v3+WRMD+v5+v6+v8+v9+v10+ablit). Skipping.")
+        and "abliteration_vector_path" in content
+        and "abliteration_rank" in content):
+    print("server_args.py: Already fully patched (v1+v2+v3+WRMD+v5+v6+v8+v9+v10+ablit-v2). Skipping.")
     sys.exit(0)
 
 # Determine if v1 fields already exist
@@ -233,9 +234,10 @@ if "abliteration_vector_path" not in content:
     if ablit_target in content:
         ablit_field = """
     # === Inline Abliteration ===
-    abliteration_vector_path: Optional[str] = None"""
+    abliteration_vector_path: Optional[str] = None
+    abliteration_rank: int = 1"""
         content = content.replace(ablit_target, ablit_target + ablit_field, 1)
-        print("Added abliteration_vector_path dataclass field")
+        print("Added abliteration dataclass fields")
     else:
         print("WARNING: Could not find insertion point for abliteration field")
 
@@ -249,8 +251,9 @@ if ("steering-vector-path" in content and "steering-attn-scale" in content
         and "steering-prefill-mode" in content
         and "steering-diagnostics" in content
         and "steering-attn-per-layer-path" in content
-        and "abliteration-vector-path" in content):
-    print("CLI args already fully patched (v1+v2+v3+WRMD+v5+v6+v8+v9+v10+ablit). Skipping.")
+        and "abliteration-vector-path" in content
+        and "abliteration-rank" in content):
+    print("CLI args already fully patched (v1+v2+v3+WRMD+v5+v6+v8+v9+v10+ablit-v2). Skipping.")
 else:
     # Find the end of add_cli_args() - look for the return statement
     target_cli = '        return parser'
@@ -566,8 +569,10 @@ if "abliteration-vector-path" not in content:
         ablit_cli = """
         # === Inline Abliteration ===
         parser.add_argument("--abliteration-vector-path", type=str, default=None,
-            help="Path to abliteration direction vector (.pt, shape [hidden_size]). "
+            help="Path to abliteration direction vector (.pt, shape [hidden_size] or [n_layers, k, hidden_size]). "
                  "Enables per-request weight-equivalent abliteration without modifying weights.")
+        parser.add_argument("--abliteration-rank", type=int, default=1,
+            help="Number of SVD directions to project out per layer (1=standard, 3=recommended for Qwen)")
 """
         content = content.replace(ablit_cli_target, ablit_cli + ablit_cli_target, 1)
         print("Added abliteration-vector-path CLI arg")
