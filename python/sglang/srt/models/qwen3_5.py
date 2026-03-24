@@ -623,7 +623,7 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
         use_reduce_scatter = self.layer_communicator.should_use_reduce_scatter(
             forward_batch
         )
-        hidden_states = self.mlp(hidden_states, forward_batch, use_reduce_scatter)
+        hidden_states = self.mlp(hidden_states, use_reduce_scatter=use_reduce_scatter)
 
         # Sub-layer capture: post-MLP (before steering, raw δ_mlp)
         _maybe_capture_sublayer(hidden_states, self.layer_id, "post_mlp", forward_batch)
@@ -942,7 +942,7 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
         use_reduce_scatter = self.layer_communicator.should_use_reduce_scatter(
             forward_batch
         )
-        hidden_states = self.mlp(hidden_states, forward_batch, use_reduce_scatter)
+        hidden_states = self.mlp(hidden_states, use_reduce_scatter=use_reduce_scatter)
 
         # Sub-layer capture: post-MLP (before steering, raw δ_mlp)
         _maybe_capture_sublayer(hidden_states, self.layer_id, "post_mlp", forward_batch)
