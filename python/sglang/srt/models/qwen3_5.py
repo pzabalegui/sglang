@@ -1702,6 +1702,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
 
         # Initialize GPU-native steering buffers (CUDA-graph compatible)
         self._init_steering()
+        self._init_abliteration()
 
     def _init_steering(self) -> None:
         """Initialize GPU-native steering buffers for CUDA-graph compatible DAS.
@@ -2086,70 +2087,51 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
             self.model._fullres_steered_layer_set = _fullres_set
             logger.info(f"[steering] DAS v8 fullresidual prefill mode: {len(_fullres_set)} active layers")
 
-        # --- Steering diagnostics ---
+
+    def _init_abliteration(self) -> None:
+        import torch as _torch
+        args = get_global_server_args()
+        ablit_path = getattr(args, "abliteration_vector_path", None)
+        self.model._abliteration_enabled = False
+        if not ablit_path:
+            return
+        text_config = getattr(self.config, "text_config", self.config)
+        n_layers = text_config.num_hidden_layers
+        hid = text_config.hidden_size
+        ablit_rank = int(getattr(args, "abliteration_rank", 1))
+        # Steering diagnostics
         if getattr(args, "steering_diagnostics", False):
             _diag_init(n_layers)
-
-        # --- Inline Abliteration v2: multi-rank per-layer (weight-equivalent, on-demand) ---
-        ablit_path = getattr(args, "abliteration_vector_path", None)
-        ablit_rank = int(getattr(args, "abliteration_rank", 1))
-        self.model._abliteration_enabled = False
-        if ablit_path:
-            ablit_data = torch.load(ablit_path, map_location="cpu", weights_only=True)
-            ablit_data = ablit_data.float()
-
-            if ablit_data.dim() == 1:
-                # Legacy: single global direction [hid] → expand to [n_layers, 1, hid]
-                ablit_data = ablit_data.unsqueeze(0).unsqueeze(0).expand(n_layers, 1, hid).clone()
-                ablit_rank = 1
-            elif ablit_data.dim() == 2:
-                # Per-layer single direction [n_layers, hid] → [n_layers, 1, hid]
-                ablit_data = ablit_data.unsqueeze(1)
-                ablit_rank = 1
-            elif ablit_data.dim() == 3:
-                # Multi-rank per-layer [n_layers, k, hid]
-                ablit_rank = min(ablit_rank, ablit_data.shape[1])
-                ablit_data = ablit_data[:, :ablit_rank, :]
-            else:
-                raise ValueError(
-                    f"Abliteration vector must be 1-D, 2-D, or 3-D, got shape {ablit_data.shape}"
-                )
-
-            assert ablit_data.shape[0] == n_layers, (
-                f"Abliteration dirs have {ablit_data.shape[0]} layers, expected {n_layers}"
-            )
-            assert ablit_data.shape[2] == hid, (
-                f"Abliteration dirs have dim {ablit_data.shape[2]}, expected {hid}"
-            )
-
-            # Normalize each direction to unit vector
-            norms = ablit_data.norm(dim=-1, keepdim=True).clamp(min=1e-10)
-            ablit_data = ablit_data / norms
-
-            self.model.register_buffer("_ablit_dirs", ablit_data.bfloat16())  # [n_layers, k, hid]
-            self.model._ablit_rank = ablit_rank
-
-            # Scratch buffers for CUDA-graph-safe decode abliteration
-            max_bs = max(getattr(args, "cuda_graph_max_bs", 128), 512)
-            self.model.register_buffer(
-                "_ablit_tmp", torch.zeros(max_bs, hid, dtype=torch.bfloat16)
-            )
-            self.model.register_buffer(
-                "_ablit_proj", torch.zeros(max_bs, 1, dtype=torch.bfloat16)
-            )
-            # Ensure per-request mask exists (reuse steering mask if already created)
-            if not hasattr(self.model, "_steering_mask") or self.model._steering_mask is None:
-                self.model.register_buffer(
-                    "_steering_mask", torch.ones(max_bs, 1, dtype=torch.bfloat16)
-                )
-
-            self.model._abliteration_enabled = True
-            self.model._steering_needs_device_sync = True
-            logger.info(
-                f"[abliteration] Inline abliteration v2 enabled: "
-                f"rank={ablit_rank}, dirs shape={list(ablit_data.shape)}, max_bs={max_bs}, "
-                f"CUDA-graph safe, per-request toggle via steering_enabled"
-            )
+        ablit_data = _torch.load(ablit_path, map_location="cpu", weights_only=True).float()
+        if ablit_data.dim() == 1:
+            ablit_data = ablit_data.unsqueeze(0).unsqueeze(0).expand(n_layers, 1, hid).clone()
+            ablit_rank = 1
+        elif ablit_data.dim() == 2:
+            ablit_data = ablit_data.unsqueeze(1)
+            ablit_rank = 1
+        elif ablit_data.dim() == 3:
+            ablit_rank = min(ablit_rank, ablit_data.shape[1])
+            ablit_data = ablit_data[:, :ablit_rank, :]
+        else:
+            raise ValueError(f"Abliteration vector must be 1-D/2-D/3-D, got {ablit_data.shape}")
+        assert ablit_data.shape[0] == n_layers
+        assert ablit_data.shape[2] == hid
+        norms = ablit_data.norm(dim=-1, keepdim=True).clamp(min=1e-10)
+        ablit_data = ablit_data / norms
+        self.model.register_buffer("_ablit_dirs", ablit_data.bfloat16())
+        self.model._ablit_rank = ablit_rank
+        max_bs = max(getattr(args, "cuda_graph_max_bs", 128), 512)
+        self.model.register_buffer("_ablit_tmp", _torch.zeros(max_bs, hid, dtype=_torch.bfloat16))
+        self.model.register_buffer("_ablit_proj", _torch.zeros(max_bs, 1, dtype=_torch.bfloat16))
+        if not hasattr(self.model, "_steering_mask") or self.model._steering_mask is None:
+            self.model.register_buffer("_steering_mask", _torch.ones(max_bs, 1, dtype=_torch.bfloat16))
+        self.model._abliteration_enabled = True
+        self.model._steering_needs_device_sync = True
+        logger.info(
+            f"[abliteration] Inline abliteration v2 enabled: "
+            f"rank={ablit_rank}, dirs shape={list(ablit_data.shape)}, max_bs={max_bs}, "
+            f"CUDA-graph safe, per-request toggle via steering_enabled"
+        )
 
     def get_embed_and_head(self):
         return self.model.embed_tokens.weight, self.lm_head.weight
