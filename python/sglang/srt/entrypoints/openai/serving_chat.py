@@ -254,12 +254,9 @@ class OpenAIServingChat(OpenAIServingBase):
         is_multimodal = self.tokenizer_manager.model_config.is_multimodal
 
         # Process messages and apply chat template
-        # Coupling: steering_enabled=True disables thinking so abliteration
-        # operates on direct completions rather than reasoning-gated refusals.
-        if request.steering and request.steering.enabled is True:
-            if request.chat_template_kwargs is None:
-                request.chat_template_kwargs = {}
-            request.chat_template_kwargs["enable_thinking"] = False
+        # Abliteration is decoupled from thinking: steering_enabled=True
+        # enables abliteration but preserves the model's thinking mode.
+        # To disable thinking, pass chat_template_kwargs.enable_thinking=False explicitly.
 
         processed_messages = self._process_messages(request, is_multimodal)
 

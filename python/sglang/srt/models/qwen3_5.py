@@ -602,9 +602,12 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
             _ablit_dirs = ablit_ctx["dirs"][_layer_id]  # [k, hid]
             _ablit_k = ablit_ctx["rank"]
             if ablit_ctx["is_prefill"]:
+                _pmask = ablit_ctx.get("prefill_mask")  # [total_tokens, 1] or None
                 for _ki in range(_ablit_k):
                     _d = _ablit_dirs[_ki]
                     _aproj = (residual * _d).sum(dim=-1, keepdim=True)
+                    if _pmask is not None:
+                        _aproj = _aproj * _pmask
                     residual = residual - _aproj * _d
             else:
                 _bs = residual.shape[0]
@@ -618,7 +621,6 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
                     torch.mul(_ap, _d, out=_atmp)
                     _atmp.mul_(_amask)
                     residual.sub_(_atmp)
-
 
         use_reduce_scatter = self.layer_communicator.should_use_reduce_scatter(
             forward_batch
@@ -922,9 +924,12 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
             _ablit_dirs = ablit_ctx["dirs"][_layer_id]  # [k, hid]
             _ablit_k = ablit_ctx["rank"]
             if ablit_ctx["is_prefill"]:
+                _pmask = ablit_ctx.get("prefill_mask")  # [total_tokens, 1] or None
                 for _ki in range(_ablit_k):
                     _d = _ablit_dirs[_ki]
                     _aproj = (residual * _d).sum(dim=-1, keepdim=True)
+                    if _pmask is not None:
+                        _aproj = _aproj * _pmask
                     residual = residual - _aproj * _d
             else:
                 _bs = residual.shape[0]
@@ -1159,12 +1164,25 @@ class Qwen3_5ForCausalLM(nn.Module):
         )
         _ablit_ctx = None
         if _abliteration:
+            # Build per-token prefill mask from per-request steering mask
+            _prefill_token_mask = None
+            if _is_prefill and hasattr(forward_batch, "steering_mask_values") and forward_batch.steering_mask_values is not None:
+                _extend_lens = getattr(forward_batch, "extend_seq_lens", None)
+                if _extend_lens is not None:
+                    _req_mask = torch.tensor(
+                        forward_batch.steering_mask_values[:len(_extend_lens)],
+                        dtype=torch.bfloat16, device=self._ablit_dirs.device
+                    )
+                    _prefill_token_mask = torch.repeat_interleave(
+                        _req_mask, _extend_lens.to(self._ablit_dirs.device)
+                    ).unsqueeze(-1)  # [total_tokens, 1]
             _ablit_ctx = {
                 "dirs": self._ablit_dirs,       # [n_layers, k, hid]
                 "rank": self._ablit_rank,        # int
                 "tmp": self._ablit_tmp,
                 "proj": self._ablit_proj,
                 "mask": self._steering_mask,
+                "prefill_mask": _prefill_token_mask,
                 "is_prefill": _is_prefill,
             }
 
