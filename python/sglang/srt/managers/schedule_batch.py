@@ -587,6 +587,12 @@ class Req(ReqDllmMixin):
                 extra_key or ""
             ) + lora_id  # lora_id is concatenated to the extra key
 
+        # Separate radix cache namespace for abliterated vs non-abliterated requests.
+        # Abliteration modifies the residual stream before KV projection, so cached
+        # KVs from ON requests must not be reused by OFF requests (and vice versa).
+        if steering_enabled:
+            extra_key = (extra_key or "") + "\x00steer=1"
+
         self.extra_key = extra_key
         self.lora_id = lora_id
         self.routing_key = routing_key
