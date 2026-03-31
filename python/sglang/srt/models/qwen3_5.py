@@ -1176,6 +1176,12 @@ class Qwen3_5ForCausalLM(nn.Module):
                     _prefill_token_mask = torch.repeat_interleave(
                         _req_mask, _extend_lens.to(self._ablit_dirs.device)
                     ).unsqueeze(-1)  # [total_tokens, 1]
+            # If prefill_token_mask is None but we're in a "prefill-like" mode
+            # (TARGET_VERIFY, DRAFT_EXTEND, etc.), fall back to the decode path
+            # which uses _steering_mask buffer. This is critical for CUDA graphs:
+            # Python if/else is "burned in" at capture time, so a None mask during
+            # capture would permanently burn in unconditional abliteration.
+            _ablit_is_prefill = _is_prefill and _prefill_token_mask is not None
             _ablit_ctx = {
                 "dirs": self._ablit_dirs,       # [n_layers, k, hid]
                 "rank": self._ablit_rank,        # int
@@ -1183,8 +1189,9 @@ class Qwen3_5ForCausalLM(nn.Module):
                 "proj": self._ablit_proj,
                 "mask": self._steering_mask,
                 "prefill_mask": _prefill_token_mask,
-                "is_prefill": _is_prefill,
+                "is_prefill": _ablit_is_prefill,
             }
+
 
         # Pass through decoder layers
         for layer_idx in range(len(self.layers)):
@@ -1972,7 +1979,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
             )
             # Per-request steering mask (1.0=ON, 0.0=OFF) [max_bs, 1]
             self.model.register_buffer(
-                "_steering_mask", torch.ones(max_bs, 1, dtype=torch.bfloat16)
+                "_steering_mask", torch.zeros(max_bs, 1, dtype=torch.bfloat16)
             )
             # DAS v5: depth-adaptive sigmoid centers [n_layers]
             # Lower threshold for early layers (intervene sooner), higher for late
@@ -2096,7 +2103,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
         self.model.register_buffer("_ablit_tmp", _torch.zeros(max_bs, hid, dtype=_torch.bfloat16))
         self.model.register_buffer("_ablit_proj", _torch.zeros(max_bs, 1, dtype=_torch.bfloat16))
         if not hasattr(self.model, "_steering_mask") or self.model._steering_mask is None:
-            self.model.register_buffer("_steering_mask", _torch.ones(max_bs, 1, dtype=_torch.bfloat16))
+            self.model.register_buffer("_steering_mask", _torch.zeros(max_bs, 1, dtype=_torch.bfloat16))
         self.model._abliteration_enabled = True
         self.model._steering_needs_device_sync = True
         logger.info(

@@ -207,7 +207,29 @@ class EAGLEDraftCudaGraphRunner:
         return out
 
     def _replay(self, forward_batch: ForwardBatch):
+        # Per-request steering mask save/set/restore (abliteration control)
+        # self.bs = num_seqs, but model processes num_seqs * num_tokens_per_bs tokens
+        import torch as _torch
+        _inner = getattr(self.model_runner.model, "model", self.model_runner.model)
+        _saved_mask = None
+        _ntpb = self.num_tokens_per_bs
+        _num_tokens = self.bs * _ntpb
+        if hasattr(_inner, "_steering_mask") and _inner._steering_mask is not None:
+            _saved_mask = _inner._steering_mask[:_num_tokens].clone()
+            _mask_vals = getattr(forward_batch, "steering_mask_values", None)
+            if _mask_vals is not None:
+                _n_reqs = min(len(_mask_vals), self.bs)
+                _req_t = _torch.tensor(
+                    _mask_vals[:_n_reqs],
+                    dtype=_inner._steering_mask.dtype,
+                    device=_inner._steering_mask.device,
+                )
+                _expanded = _req_t.repeat_interleave(_ntpb)
+                _actual = min(len(_expanded), _num_tokens)
+                _inner._steering_mask[:_actual, 0] = _expanded[:_actual]
         self.graphs[self.bs].replay()
+        if _saved_mask is not None:
+            _inner._steering_mask[:_num_tokens].copy_(_saved_mask)
 
     def capture(self):
         CudaGraphRunner.capture(self)

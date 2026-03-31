@@ -144,6 +144,8 @@ class ModelConfig:
             mm_disabled_models = [
                 "Gemma3ForConditionalGeneration",
                 "Llama4ForConditionalGeneration",
+                "Qwen3_5ForConditionalGeneration",
+                "Qwen3_5MoeForConditionalGeneration",
                 "Step3VLForConditionalGeneration",
             ]
             if self.hf_config.architectures[0] in mm_disabled_models:
