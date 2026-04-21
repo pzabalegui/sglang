@@ -1166,6 +1166,24 @@ class CudaGraphRunner:
                             if _tok_idx_m < _num_tokens:
                                 _inner._steer_momentum[_tok_idx_m].zero_()
 
+        # Update emotion steering buffers from file config before replay
+        if getattr(_inner, "_emotion_enabled", False):
+            from sglang.srt.models.qwen3_5 import _get_emotion_config
+
+            _ecfg = _get_emotion_config()
+            _emo_name = _ecfg.get("emotion") if _ecfg else None
+            _emo_str = float(_ecfg.get("strength", 0.0)) if _ecfg else 0.0
+            _last = getattr(_inner, "_emotion_last_cfg", (None, 0.0))
+            if (_emo_name, _emo_str) != _last:
+                if _emo_name and _emo_name in getattr(_inner, "_emotion_name_to_idx", {}):
+                    _idx = _inner._emotion_name_to_idx[_emo_name]
+                    _inner._emotion_dir.copy_(_inner._emotion_all_dirs[_idx])
+                    _inner._emotion_strength.fill_(_emo_str)
+                else:
+                    _inner._emotion_dir.zero_()
+                    _inner._emotion_strength.fill_(0.0)
+                _inner._emotion_last_cfg = (_emo_name, _emo_str)
+
         self.graphs[graph_key].replay()
 
         # Restore all steering buffers after replay

@@ -194,6 +194,36 @@ def _maybe_capture_sublayer(hidden_states, layer_idx, stage, forward_batch, n_la
 
 
 # ============================================================
+# EMOTION STEERING — file-based config for runtime switching
+# ============================================================
+
+_EMOTION_CONFIG_CACHE = [None, 0]  # [config, last_check_time]
+_EMOTION_CONFIG_PATH = "/tmp/emotion_config.json"
+
+
+def _get_emotion_config():
+    """Read emotion config with 1-second cache."""
+    import time
+
+    now = time.time()
+    if now - _EMOTION_CONFIG_CACHE[1] < 1.0 and _EMOTION_CONFIG_CACHE[0] is not None:
+        return _EMOTION_CONFIG_CACHE[0]
+    _EMOTION_CONFIG_CACHE[1] = now
+
+    if not _os.path.exists(_EMOTION_CONFIG_PATH):
+        _EMOTION_CONFIG_CACHE[0] = {"emotion": None, "strength": 0.0}
+        return _EMOTION_CONFIG_CACHE[0]
+    try:
+        with open(_EMOTION_CONFIG_PATH, "r") as f:
+            cfg = _json.load(f)
+        _EMOTION_CONFIG_CACHE[0] = cfg
+        return cfg
+    except Exception:
+        _EMOTION_CONFIG_CACHE[0] = {"emotion": None, "strength": 0.0}
+        return _EMOTION_CONFIG_CACHE[0]
+
+
+# ============================================================
 # STEERING DIAGNOSTICS — per-layer projection tracking
 # ============================================================
 
@@ -1084,6 +1114,31 @@ class Qwen3_5ForCausalLM(nn.Module):
             self._steering_needs_device_sync = False
             logger.info(f"[steering] Migrated steering buffers to {_dev}")
 
+        # --- Emotion steering: update buffers from file config (prefill only) ---
+        _emotion_active = getattr(self, "_emotion_enabled", False)
+        if _emotion_active and not forward_batch.forward_mode.is_decode():
+            _ecfg = _get_emotion_config()
+            _emo_name = _ecfg.get("emotion") if _ecfg else None
+            _emo_str = float(_ecfg.get("strength", 0.0)) if _ecfg else 0.0
+            _last = getattr(self, "_emotion_last_cfg", (None, 0.0))
+            if (_emo_name, _emo_str) != _last:
+                if _emo_name and _emo_name in self._emotion_name_to_idx:
+                    _idx = self._emotion_name_to_idx[_emo_name]
+                    self._emotion_dir.copy_(self._emotion_all_dirs[_idx])
+                    self._emotion_strength.fill_(_emo_str)
+                    logger.info(
+                        f"[emotion] Activated: {_emo_name}, strength={_emo_str}"
+                    )
+                else:
+                    self._emotion_dir.zero_()
+                    self._emotion_strength.fill_(0.0)
+                    if _emo_name:
+                        logger.warning(
+                            f"[emotion] Unknown emotion '{_emo_name}', "
+                            f"available: {self._emotion_names}"
+                        )
+                self._emotion_last_cfg = (_emo_name, _emo_str)
+
         # --- DAS v1/v2/v4 steering setup ---
         _is_prefill = not forward_batch.forward_mode.is_decode()
         _steering_off = getattr(forward_batch, "steering_disabled", False)
@@ -1251,6 +1306,30 @@ class Qwen3_5ForCausalLM(nn.Module):
                         _proj = (hidden_states * _dir).sum(dim=-1, keepdim=True)
                         _proj.clamp_(min=0)
                         hidden_states = hidden_states - _scale * _proj * _dir
+
+            # Emotion steering: h' = h + strength * ||h+r|| * dir
+            if (
+                _emotion_active
+                and layer_idx == getattr(self, "_emotion_target_layer", -1)
+            ):
+                if _is_prefill:
+                    _emo_s = self._emotion_strength.item()
+                    if _emo_s != 0.0:
+                        _full_e = hidden_states + residual
+                        _snorm = _full_e.norm(dim=-1, keepdim=True)
+                        hidden_states = hidden_states + _emo_s * _snorm * self._emotion_dir
+                else:
+                    # Decode: CUDA-graph safe (always executes, zero strength = no-op)
+                    _bs = hidden_states.shape[0]
+                    _en = self._emotion_norm[:_bs]
+                    _et = self._emotion_tmp[:_bs]
+                    torch.add(hidden_states, residual, out=_et)
+                    torch.mul(_et, _et, out=_et)
+                    torch.sum(_et, dim=-1, keepdim=True, out=_en)
+                    _en.sqrt_()
+                    _en.mul_(self._emotion_strength)
+                    torch.mul(_en, self._emotion_dir, out=_et)
+                    hidden_states.add_(_et)
 
             # Decode steering (CUDA-graph safe)
             if _has_decode_steering and residual is not None:
@@ -1682,6 +1761,76 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
         # Initialize GPU-native steering buffers (CUDA-graph compatible)
         self._init_steering()
         self._init_abliteration()
+        self._init_emotion_steering()
+
+    def _init_emotion_steering(self) -> None:
+        """Initialize emotion steering buffers for runtime-switchable additive steering.
+
+        Loads multiple named emotion vectors from an .npz file and pre-allocates
+        CUDA-graph-safe buffers. The active emotion and strength are controlled
+        via /tmp/emotion_config.json at runtime.
+
+        Steering formula: h' = h + strength * ||h|| * emotion_dir
+        """
+        import numpy as np
+
+        args = get_global_server_args()
+        path = getattr(args, "emotion_vectors_path", None)
+        self.model._emotion_enabled = False
+        if not path:
+            return
+
+        text_config = getattr(self.config, "text_config", self.config)
+        hid = text_config.hidden_size
+        target_layer = int(getattr(args, "emotion_target_layer", 43))
+        max_bs = max(getattr(args, "cuda_graph_max_bs", 128), 512)
+
+        data = np.load(path)
+        emotion_names = sorted(data.files)
+        if not emotion_names:
+            logger.warning("[emotion] No vectors found in %s", path)
+            return
+
+        # Store all emotion vectors: {name: index}
+        all_vecs = []
+        for name in emotion_names:
+            vec = torch.from_numpy(data[name]).float()
+            assert vec.shape == (hid,), (
+                f"Emotion vector '{name}' shape {vec.shape} != ({hid},)"
+            )
+            vec = vec / vec.norm().clamp(min=1e-8)
+            all_vecs.append(vec)
+
+        all_vecs_t = torch.stack(all_vecs)  # [n_emotions, hid]
+        self.model.register_buffer("_emotion_all_dirs", all_vecs_t.bfloat16())
+        self.model._emotion_name_to_idx = {n: i for i, n in enumerate(emotion_names)}
+        self.model._emotion_names = emotion_names
+        self.model._emotion_target_layer = target_layer
+
+        # Active emotion direction [hid] — updated in-place at runtime
+        self.model.register_buffer(
+            "_emotion_dir", torch.zeros(hid, dtype=torch.bfloat16)
+        )
+        # Active strength scalar — updated in-place
+        self.model.register_buffer(
+            "_emotion_strength", torch.tensor(0.0, dtype=torch.bfloat16)
+        )
+        # Workspace buffers for CUDA-graph-safe decode computation
+        self.model.register_buffer(
+            "_emotion_tmp", torch.zeros(max_bs, hid, dtype=torch.bfloat16)
+        )
+        self.model.register_buffer(
+            "_emotion_norm", torch.zeros(max_bs, 1, dtype=torch.bfloat16)
+        )
+        # Track last applied config to avoid redundant updates
+        self.model._emotion_last_cfg = (None, 0.0)
+        self.model._emotion_enabled = True
+        self.model._steering_needs_device_sync = True
+
+        logger.info(
+            f"[emotion] Loaded {len(emotion_names)} vectors: {emotion_names}, "
+            f"target_layer={target_layer}, max_bs={max_bs}, CUDA-graph safe"
+        )
 
     def _init_steering(self) -> None:
         """Initialize GPU-native steering buffers for CUDA-graph compatible DAS.

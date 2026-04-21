@@ -1392,6 +1392,40 @@ async def openai_v1_chat_completions(
     )
 
 
+@app.post("/set_steering", response_class=ORJSONResponse)
+async def set_emotion_steering(raw_request: Request):
+    """Set the active emotion steering vector and strength.
+
+    Body: {"emotion": "calm", "strength": 0.2}
+    Set emotion to null or strength to 0 to disable.
+    """
+    import json as _json
+
+    body = await raw_request.json()
+    config_path = "/tmp/emotion_config.json"
+    cfg = {
+        "emotion": body.get("emotion"),
+        "strength": float(body.get("strength", 0.0)),
+    }
+    with open(config_path, "w") as f:
+        _json.dump(cfg, f)
+    return ORJSONResponse({"status": "ok", **cfg})
+
+
+@app.get("/get_steering", response_class=ORJSONResponse)
+async def get_emotion_steering():
+    """Get the current emotion steering configuration."""
+    import json as _json
+
+    config_path = "/tmp/emotion_config.json"
+    try:
+        with open(config_path, "r") as f:
+            cfg = _json.load(f)
+        return ORJSONResponse(cfg)
+    except FileNotFoundError:
+        return ORJSONResponse({"emotion": None, "strength": 0.0})
+
+
 @app.post(
     "/v1/embeddings",
     response_class=ORJSONResponse,

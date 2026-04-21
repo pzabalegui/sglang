@@ -617,6 +617,9 @@ class ServerArgs:
     steering_trap_ramp: int = 5
     abliteration_vector_path: Optional[str] = None
     abliteration_rank: int = 1
+    # Emotion steering: .npz file with named emotion vectors (e.g., calm, desperate)
+    emotion_vectors_path: Optional[str] = None
+    emotion_target_layer: int = 43
     enable_mixed_chunk: bool = False
     enable_dp_attention: bool = False
     enable_dp_lm_head: bool = False
@@ -5274,6 +5277,18 @@ class ServerArgs:
             type=int,
             default=1,
             help="Rank k for multi-rank abliteration (default 1).",
+        )
+        parser.add_argument(
+            "--emotion-vectors-path",
+            type=str,
+            default=None,
+            help="Path to .npz file with named emotion vectors for additive steering.",
+        )
+        parser.add_argument(
+            "--emotion-target-layer",
+            type=int,
+            default=43,
+            help="Layer index for emotion steering injection (default 43).",
         )
 
     @classmethod
