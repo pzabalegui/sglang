@@ -1785,21 +1785,30 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
         target_layer = int(getattr(args, "emotion_target_layer", 43))
         max_bs = max(getattr(args, "cuda_graph_max_bs", 128), 512)
 
-        data = np.load(path)
-        emotion_names = sorted(data.files)
-        if not emotion_names:
-            logger.warning("[emotion] No vectors found in %s", path)
-            return
+        data = np.load(path, allow_pickle=True)
 
-        # Store all emotion vectors: {name: index}
+        # Filter: keep only float vectors matching hidden_size, skip metadata
         all_vecs = []
-        for name in emotion_names:
-            vec = torch.from_numpy(data[name]).float()
-            assert vec.shape == (hid,), (
-                f"Emotion vector '{name}' shape {vec.shape} != ({hid},)"
-            )
+        emotion_names = []
+        for name in sorted(data.files):
+            if name.startswith("_"):
+                continue
+            arr = data[name]
+            if arr.dtype.kind not in ("f", "i", "u"):  # skip string arrays
+                continue
+            vec = torch.from_numpy(arr.astype(np.float32))
+            if vec.shape != (hid,):
+                logger.warning(
+                    "[emotion] Skipping '%s': shape %s != (%d,)", name, vec.shape, hid
+                )
+                continue
             vec = vec / vec.norm().clamp(min=1e-8)
             all_vecs.append(vec)
+            emotion_names.append(name)
+
+        if not emotion_names:
+            logger.warning("[emotion] No valid vectors found in %s", path)
+            return
 
         all_vecs_t = torch.stack(all_vecs)  # [n_emotions, hid]
         self.model.register_buffer("_emotion_all_dirs", all_vecs_t.bfloat16())
