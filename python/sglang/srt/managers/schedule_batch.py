@@ -593,6 +593,20 @@ class Req(ReqDllmMixin):
         if steering_enabled:
             extra_key = (extra_key or "") + "\x00steer=1"
 
+        # Separate radix cache namespace per active emotion vector.
+        # Emotion steering modifies hidden states at a target layer, so KVs
+        # cached under one emotion must not be reused by a different emotion.
+        try:
+            from sglang.srt.models.qwen3_5 import _get_emotion_config
+
+            _ecfg = _get_emotion_config()
+            _emo = _ecfg.get("emotion") if _ecfg else None
+            _str = _ecfg.get("strength", 0.0) if _ecfg else 0.0
+            if _emo is not None and _str != 0.0:
+                extra_key = (extra_key or "") + f"\x00emo={_emo}@{_str}"
+        except ImportError:
+            pass
+
         self.extra_key = extra_key
         self.lora_id = lora_id
         self.routing_key = routing_key
