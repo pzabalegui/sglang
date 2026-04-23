@@ -273,6 +273,9 @@ class CaptureState:
                     self._total_tokens_written,
                 )
 
+    _debug_record_count = 0
+    _debug_append_count = 0
+
     def record(
         self,
         layer_idx: int,
@@ -300,7 +303,26 @@ class CaptureState:
         is_prefill = not forward_batch.forward_mode.is_decode()
         req_pool_indices = getattr(forward_batch, "req_pool_indices", None)
         if req_pool_indices is None or len(req_pool_indices) == 0:
+            if self._debug_record_count < 3:
+                logger.info(
+                    "[capture-debug] record L%d %s: no req_pool_indices (got %r)",
+                    layer_idx,
+                    "prefill" if is_prefill else "decode",
+                    req_pool_indices,
+                )
+                self._debug_record_count += 1
             return
+
+        if self._debug_record_count < 6:
+            logger.info(
+                "[capture-debug] record L%d %s: hs=%s rp=%s extend=%s",
+                layer_idx,
+                "prefill" if is_prefill else "decode",
+                tuple(stream.shape),
+                (req_pool_indices.tolist() if torch.is_tensor(req_pool_indices) else list(req_pool_indices)),
+                (getattr(forward_batch, "extend_seq_lens", None)),
+            )
+            self._debug_record_count += 1
 
         # Move to CPU asynchronously; bf16 to minimize bandwidth.
         # `.contiguous()` on GPU first so the copy is a single memcpy.
@@ -386,9 +408,21 @@ class CaptureState:
         """Serialize and free the buffer for a finished request."""
         with self._lock:
             if not self._active:
+                logger.info(
+                    "[capture-debug] finalize rp=%d rid=%s: session inactive",
+                    req_pool_idx,
+                    rid,
+                )
                 return
             buf = self._buffers.pop(req_pool_idx, None)
             if buf is None:
+                logger.info(
+                    "[capture-debug] finalize rp=%d rid=%s: no buffer "
+                    "(open=%s)",
+                    req_pool_idx,
+                    rid,
+                    list(self._buffers.keys()),
+                )
                 return
             self._serialize_unlocked(buf, rid)
 
