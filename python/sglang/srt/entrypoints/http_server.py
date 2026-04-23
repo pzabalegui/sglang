@@ -1411,6 +1411,19 @@ async def openai_v1_chat_completions(
     )
 
 
+# Alias without the /v1 prefix. The CSI proxy (CSI's local router for Alias
+# Robotics models) POSTs to {CSI_ALIAS_ENDPOINT}/chat/completions without the
+# /v1/ segment, so we expose the same handler at both paths.
+@app.post("/chat/completions", dependencies=[Depends(validate_json_request)])
+async def chat_completions_alias(
+    request: ChatCompletionRequest, raw_request: Request
+):
+    """Alias for /v1/chat/completions (used by the CSI proxy)."""
+    return await raw_request.app.state.openai_serving_chat.handle_request(
+        request, raw_request
+    )
+
+
 @app.post("/set_steering", response_class=ORJSONResponse)
 async def set_emotion_steering(raw_request: Request):
     """Set the active emotion steering vector and strength.
