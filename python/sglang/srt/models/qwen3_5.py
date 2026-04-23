@@ -77,6 +77,10 @@ from sglang.srt.utils import add_prefix, is_cuda, is_npu, make_layers, set_weigh
 from sglang.srt.utils.hf_transformers_utils import get_processor
 
 from sglang.srt.server_args import get_global_server_args
+from sglang.srt.managers.capture_state import (
+    capture_is_active_layer as _capture_is_active_layer,
+    capture_record as _capture_record,
+)
 import math as _math
 import json as _json
 import os as _os
@@ -1262,6 +1266,11 @@ class Qwen3_5ForCausalLM(nn.Module):
                     steering_ctx=_steering_ctx,
                     ablit_ctx=_ablit_ctx,
                 )
+
+            # Deep activation capture (feature/activation-capture).
+            # No-op when no capture session is active.
+            if _capture_is_active_layer(layer_idx):
+                _capture_record(layer_idx, hidden_states, residual, forward_batch)
 
             # DAS v8: Post-layer full-residual steering (prefill only)
             if (

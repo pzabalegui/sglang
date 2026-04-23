@@ -35,6 +35,23 @@ logger = logging.getLogger(__name__)
 DEFAULT_FORCE_STREAM_INTERVAL = 50
 
 
+def _maybe_finalize_capture(req: "Req") -> None:
+    """Flush deep-capture buffers for a just-finished request.
+
+    Imported lazily to avoid a hard dependency on capture_state and to keep
+    the steering-only branch self-contained.
+    """
+    try:
+        from sglang.srt.managers.capture_state import capture_finalize
+
+        rp_idx = getattr(req, "req_pool_idx", None)
+        if rp_idx is None:
+            return
+        capture_finalize(int(rp_idx), rid=getattr(req, "rid", None))
+    except Exception as e:
+        logger.debug("[capture] finalize skipped: %s", e)
+
+
 class SchedulerOutputProcessorMixin:
     """
     This class implements the output processing logic for Scheduler.
@@ -380,6 +397,7 @@ class SchedulerOutputProcessorMixin:
                 if req.finished():
                     release_kv_cache(req, self.tree_cache)
                     req.time_stats.set_completion_time()
+                    _maybe_finalize_capture(req)
                     break
 
                 self.tree_cache.cache_unfinished_req(req)
@@ -470,6 +488,7 @@ class SchedulerOutputProcessorMixin:
                     release_kv_cache(req, self.tree_cache)
 
                 req.time_stats.set_completion_time()
+                _maybe_finalize_capture(req)
 
             self.maybe_collect_customized_info(i, req, logits_output)
 

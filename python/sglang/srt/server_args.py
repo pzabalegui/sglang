@@ -620,6 +620,13 @@ class ServerArgs:
     # Emotion steering: .npz file with named emotion vectors (e.g., calm, desperate)
     emotion_vectors_path: Optional[str] = None
     emotion_target_layer: int = 43
+    # Deep activation capture (feature/activation-capture).
+    # When capture_dir is set, orchestrators can POST /set_capture to start
+    # a per-CTF capture session that writes residual-stream activations at
+    # the selected layers to {capture_dir}/{ctf}/turn_{NNNN}.npz.
+    capture_dir: Optional[str] = None
+    capture_layers: Optional[str] = None  # csv of ints
+    capture_max_tokens_per_request: int = 16384
     enable_mixed_chunk: bool = False
     enable_dp_attention: bool = False
     enable_dp_lm_head: bool = False
@@ -5289,6 +5296,35 @@ class ServerArgs:
             type=int,
             default=43,
             help="Layer index for emotion steering injection (default 43).",
+        )
+        parser.add_argument(
+            "--capture-dir",
+            type=str,
+            default=None,
+            help=(
+                "Root directory for deep activation capture. If set, enables "
+                "POST /set_capture / /stop_capture endpoints; per-CTF files "
+                "are written to {capture_dir}/{ctf}/turn_{NNNN}.npz."
+            ),
+        )
+        parser.add_argument(
+            "--capture-layers",
+            type=str,
+            default="40,43,48,55,56,57,58,59,60,61,63",
+            help=(
+                "Comma-separated list of decoder layer indices to capture. "
+                "Default targets the intervention layer (43) plus the "
+                "emotional readout band (55-63)."
+            ),
+        )
+        parser.add_argument(
+            "--capture-max-tokens-per-request",
+            type=int,
+            default=16384,
+            help=(
+                "Safety cap on tokens captured per request (prevents OOM on "
+                "runaway generations)."
+            ),
         )
 
     @classmethod

@@ -318,6 +318,25 @@ async def lifespan(fast_api_app: FastAPI):
         _global_state.tokenizer_manager
     )
 
+    # Seed deep activation capture defaults from CLI flags.
+    if getattr(server_args, "capture_dir", None):
+        from sglang.srt.managers.capture_state import get_capture_state
+
+        layers_csv = getattr(server_args, "capture_layers", None) or ""
+        layers_list = [int(x) for x in layers_csv.split(",") if x.strip()]
+        get_capture_state().configure_from_cli(
+            save_dir=server_args.capture_dir,
+            layers=layers_list,
+            max_tokens=getattr(server_args, "capture_max_tokens_per_request", 16384),
+        )
+        if server_args.max_running_requests != 1:
+            logger.warning(
+                "[capture] --capture-dir is set but --max-running-requests=%s. "
+                "Attribution requires max_running_requests=1 for reliable turn "
+                "numbering; please restart with --max-running-requests 1.",
+                server_args.max_running_requests,
+            )
+
     # Initialize Ollama-compatible serving handler
     fast_api_app.state.ollama_serving = OllamaServing(_global_state.tokenizer_manager)
 
@@ -1424,6 +1443,73 @@ async def get_emotion_steering():
         return ORJSONResponse(cfg)
     except FileNotFoundError:
         return ORJSONResponse({"emotion": None, "strength": 0.0})
+
+
+# ============================================================
+# DEEP ACTIVATION CAPTURE (feature/activation-capture)
+# Driven by orchestrate_capture.py — one session per CTF.
+# ============================================================
+
+
+@app.post("/set_capture", response_class=ORJSONResponse)
+async def set_capture(raw_request: Request):
+    """Start a new deep-activation-capture session for one CTF.
+
+    Body:
+    {
+      "ctf": "loot_stash",           # required: subdir name
+      "save_dir": "/data/...",       # optional: overrides CLI default
+      "layers": [40,43,48,...],      # optional: overrides CLI default
+      "max_tokens_per_request": N    # optional: overrides CLI default
+    }
+
+    Any pending buffers from a previous session are flushed first.
+    """
+    from sglang.srt.managers.capture_state import get_capture_state
+
+    body = await raw_request.json()
+    ctf = body.get("ctf")
+    if not ctf:
+        return ORJSONResponse({"error": "missing 'ctf'"}, status_code=400)
+
+    state = get_capture_state()
+    save_dir = body.get("save_dir") or state.default_save_dir
+    if not save_dir:
+        return ORJSONResponse(
+            {"error": "no save_dir configured (pass --capture-dir or body.save_dir)"},
+            status_code=400,
+        )
+    layers = body.get("layers") or state.default_layers
+    if not layers:
+        return ORJSONResponse(
+            {"error": "no capture layers configured"}, status_code=400
+        )
+    max_tokens = int(body.get("max_tokens_per_request", state.default_max_tokens))
+
+    status = state.start_session(
+        ctf=ctf,
+        save_dir=save_dir,
+        layers=layers,
+        max_tokens_per_request=max_tokens,
+    )
+    return ORJSONResponse({"status": "ok", **status})
+
+
+@app.post("/stop_capture", response_class=ORJSONResponse)
+async def stop_capture():
+    """End the current capture session (flushes pending buffers)."""
+    from sglang.srt.managers.capture_state import get_capture_state
+
+    status = get_capture_state().stop_session()
+    return ORJSONResponse({"status": "ok", **status})
+
+
+@app.get("/capture_status", response_class=ORJSONResponse)
+async def capture_status():
+    """Inspect the current capture session (active / ctf / counters)."""
+    from sglang.srt.managers.capture_state import get_capture_state
+
+    return ORJSONResponse(get_capture_state().status())
 
 
 @app.post(
