@@ -97,6 +97,15 @@ class CaptureState:
         self._total_tokens_written: int = 0
         self._total_files_written: int = 0
         self._overflow_dropped: int = 0
+        # Cross-process sync: SGLang runs the HTTP layer and the Scheduler
+        # (which owns the model forward) in separate OS processes, so an
+        # in-memory singleton is not enough. The config file below is the
+        # source of truth for the session; each process lazily reconciles
+        # its local CaptureState when a forward pass comes in.
+        self._config_mtime: float = 0.0
+        self._config_last_check: float = 0.0
+        self._config_check_ttl: float = 0.25
+        self._is_writer: bool = False  # True on the HTTP process only
 
     # ------------------------------------------------------------------
     # session control
@@ -109,23 +118,20 @@ class CaptureState:
         layers: List[int],
         max_tokens_per_request: int = 16384,
     ) -> Dict[str, object]:
-        """Begin a capture session for a single CTF."""
+        """Begin a capture session for a single CTF.
+
+        Called from the HTTP process (writer). The actual data acquisition
+        happens in the scheduler process, which observes the config file
+        and reconciles its own local state on the next forward pass.
+        """
         with self._lock:
-            if self._active:
-                logger.warning(
-                    "[capture] start_session called while already active (ctf=%s), "
-                    "stopping previous session first",
-                    self._ctf,
-                )
-                self._flush_all_unlocked()
+            self._is_writer = True
             os.makedirs(os.path.join(save_dir, ctf), exist_ok=True)
             self._active = True
             self._ctf = ctf
             self._save_dir = save_dir
             self._layers_set = frozenset(int(l) for l in layers)
             self._max_tokens = int(max_tokens_per_request)
-            self._turn_counter = 0
-            self._buffers.clear()
             logger.info(
                 "[capture] session started ctf=%s save_dir=%s layers=%s max_tokens=%d",
                 ctf,
@@ -133,28 +139,21 @@ class CaptureState:
                 sorted(self._layers_set),
                 self._max_tokens,
             )
-            # Also write a config file so the forward pass (which runs
-            # potentially in another process under TP) can cheaply test if
-            # capture is active without cross-process IPC.
             self._write_config_unlocked()
             return self.status_unlocked()
 
     def stop_session(self) -> Dict[str, object]:
         with self._lock:
-            if not self._active:
-                logger.info("[capture] stop_session called but session not active")
-                return self.status_unlocked()
-            self._flush_all_unlocked()
+            self._is_writer = True
             self._active = False
+            prev_ctf = self._ctf
             self._ctf = None
+            # In the HTTP process we never accumulate buffers; we just
+            # toggle the config and let the scheduler process flush on its
+            # side once it detects the transition.
             self._buffers.clear()
             self._write_config_unlocked()
-            logger.info(
-                "[capture] session stopped. total_files=%d total_tokens=%d overflow_dropped=%d",
-                self._total_files_written,
-                self._total_tokens_written,
-                self._overflow_dropped,
-            )
+            logger.info("[capture] stop_session signalled (prev ctf=%s)", prev_ctf)
             return self.status_unlocked()
 
     def status(self) -> Dict[str, object]:
@@ -162,6 +161,21 @@ class CaptureState:
             return self.status_unlocked()
 
     def status_unlocked(self) -> Dict[str, object]:
+        # For the writer (HTTP process) we derive the written-files count
+        # from disk, because the scheduler-side counters live in a
+        # different process. For the reader (scheduler) we return the
+        # in-memory counters directly.
+        files_on_disk = None
+        if self._is_writer and self._save_dir and self._ctf:
+            try:
+                ctf_dir = os.path.join(self._save_dir, self._ctf)
+                files_on_disk = sum(
+                    1
+                    for f in os.listdir(ctf_dir)
+                    if f.endswith(".npz")
+                ) if os.path.isdir(ctf_dir) else 0
+            except Exception:
+                files_on_disk = None
         return {
             "active": self._active,
             "ctf": self._ctf,
@@ -170,7 +184,9 @@ class CaptureState:
             "max_tokens_per_request": self._max_tokens,
             "turn_counter": self._turn_counter,
             "open_buffers": len(self._buffers),
-            "total_files_written": self._total_files_written,
+            "total_files_written": (
+                files_on_disk if files_on_disk is not None else self._total_files_written
+            ),
             "total_tokens_written": self._total_tokens_written,
             "overflow_dropped": self._overflow_dropped,
         }
@@ -181,7 +197,81 @@ class CaptureState:
 
     def is_active_layer(self, layer_idx: int) -> bool:
         """Fast path test for the forward hook — no lock."""
+        # Reconcile with on-disk config if we are a reader (scheduler).
+        if not self._is_writer:
+            self._maybe_reload_config()
         return self._active and layer_idx in self._layers_set
+
+    def _maybe_reload_config(self) -> None:
+        """Readers (scheduler process) poll the config file at most once per TTL.
+
+        When `active` transitions false→true, we open a session here; when
+        true→false, we flush all pending buffers. This is the only
+        synchronization channel between the HTTP writer process and the
+        scheduler reader process.
+        """
+        now = time.time()
+        if now - self._config_last_check < self._config_check_ttl:
+            return
+        self._config_last_check = now
+        try:
+            st = os.stat(_CAPTURE_CONFIG_PATH)
+        except FileNotFoundError:
+            if self._active:
+                # writer never signalled stop but file is gone — tear down.
+                with self._lock:
+                    self._flush_all_unlocked()
+                    self._active = False
+                    self._ctf = None
+            return
+        if st.st_mtime <= self._config_mtime:
+            return
+        try:
+            with open(_CAPTURE_CONFIG_PATH, "r") as f:
+                cfg = json.load(f)
+        except Exception:
+            return
+        self._config_mtime = st.st_mtime
+        cfg_active = bool(cfg.get("active", False))
+        cfg_ctf = cfg.get("ctf")
+        cfg_save_dir = cfg.get("save_dir")
+        cfg_layers = cfg.get("layers", [])
+        cfg_max_tokens = int(cfg.get("max_tokens_per_request", self._max_tokens))
+        with self._lock:
+            # Transition into a new session (or switch CTFs).
+            if cfg_active and cfg_save_dir and cfg_ctf and (
+                not self._active or self._ctf != cfg_ctf
+            ):
+                # Flush anything from a previous session.
+                if self._buffers:
+                    self._flush_all_unlocked()
+                try:
+                    os.makedirs(os.path.join(cfg_save_dir, cfg_ctf), exist_ok=True)
+                except Exception:
+                    pass
+                self._active = True
+                self._ctf = cfg_ctf
+                self._save_dir = cfg_save_dir
+                self._layers_set = frozenset(int(l) for l in cfg_layers)
+                self._max_tokens = cfg_max_tokens
+                self._turn_counter = 0
+                self._buffers.clear()
+                logger.info(
+                    "[capture-reader] activated ctf=%s layers=%s save_dir=%s",
+                    self._ctf,
+                    sorted(self._layers_set),
+                    self._save_dir,
+                )
+            # Transition out of a session.
+            elif not cfg_active and self._active:
+                self._flush_all_unlocked()
+                self._active = False
+                self._ctf = None
+                logger.info(
+                    "[capture-reader] deactivated; total_files=%d total_tokens=%d",
+                    self._total_files_written,
+                    self._total_tokens_written,
+                )
 
     def record(
         self,
