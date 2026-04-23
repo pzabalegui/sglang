@@ -192,10 +192,10 @@ class SchedulerOutputProcessorMixin:
                     req.check_finished()
 
                     if req.finished():
+                        _maybe_finalize_capture(req)
                         self.maybe_collect_routed_experts(req)
                         release_kv_cache(req, self.tree_cache)
                         req.time_stats.set_completion_time()
-                        _maybe_finalize_capture(req)
                     elif not batch.decoding_reqs or req not in batch.decoding_reqs:
                         # This updates radix so others can match
                         self.tree_cache.cache_unfinished_req(req)
@@ -400,9 +400,9 @@ class SchedulerOutputProcessorMixin:
                 req.output_ids.append(next_token_id)
                 req.check_finished()
                 if req.finished():
+                    _maybe_finalize_capture(req)
                     release_kv_cache(req, self.tree_cache)
                     req.time_stats.set_completion_time()
-                    _maybe_finalize_capture(req)
                     break
 
                 self.tree_cache.cache_unfinished_req(req)
@@ -485,6 +485,7 @@ class SchedulerOutputProcessorMixin:
                             del pixel_values
                 self.maybe_collect_routed_experts(req)
 
+                _maybe_finalize_capture(req)
                 if self.server_args.disaggregation_decode_enable_offload_kvcache:
                     # Asynchronously offload KV cache; release_kv_cache will be called after Device->Host transfer completes
                     if not self.decode_offload_manager.offload_kv_cache(req):
@@ -493,7 +494,6 @@ class SchedulerOutputProcessorMixin:
                     release_kv_cache(req, self.tree_cache)
 
                 req.time_stats.set_completion_time()
-                _maybe_finalize_capture(req)
 
             self.maybe_collect_customized_info(i, req, logits_output)
 
