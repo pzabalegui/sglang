@@ -515,22 +515,16 @@ def get_capture_state() -> CaptureState:
 
 
 # Convenience aliases for the hot path in the model forward.
+# IMPORTANT: these must lazily initialize the singleton, because the
+# Scheduler process never calls get_capture_state() explicitly — it
+# only sees these module-level functions from the model hook.
 def capture_is_active_layer(layer_idx: int) -> bool:
-    state = _CAPTURE_STATE
-    if state is None:
-        return False
-    return state.is_active_layer(layer_idx)
+    return get_capture_state().is_active_layer(layer_idx)
 
 
 def capture_record(layer_idx, hidden_states, residual, forward_batch) -> None:
-    state = _CAPTURE_STATE
-    if state is None:
-        return
-    state.record(layer_idx, hidden_states, residual, forward_batch)
+    get_capture_state().record(layer_idx, hidden_states, residual, forward_batch)
 
 
 def capture_finalize(req_pool_idx: int, rid: Optional[str] = None) -> None:
-    state = _CAPTURE_STATE
-    if state is None:
-        return
-    state.finalize_request(req_pool_idx, rid)
+    get_capture_state().finalize_request(req_pool_idx, rid)
