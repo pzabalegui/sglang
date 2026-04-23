@@ -1512,6 +1512,47 @@ async def capture_status():
     return ORJSONResponse(get_capture_state().status())
 
 
+@app.get("/capture_disk", response_class=ORJSONResponse)
+async def capture_disk():
+    """Report free/used disk under capture-dir so CPU-side orchestrators
+    can implement a disk watchdog without needing SSH to the GPU box."""
+    import os
+    import shutil
+
+    from sglang.srt.managers.capture_state import get_capture_state
+
+    save_dir = get_capture_state().status().get("save_dir")
+    info = {"save_dir": save_dir, "ok": False}
+    if not save_dir:
+        info["error"] = "capture_dir not configured (--capture-dir missing?)"
+        return ORJSONResponse(info)
+
+    probe = save_dir if os.path.isdir(save_dir) else os.path.dirname(save_dir) or "/"
+    try:
+        usage = shutil.disk_usage(probe)
+        dir_size = 0
+        if os.path.isdir(save_dir):
+            for root_dir, _dirs, files in os.walk(save_dir):
+                for fn in files:
+                    try:
+                        dir_size += os.path.getsize(os.path.join(root_dir, fn))
+                    except OSError:
+                        pass
+        info.update(
+            ok=True,
+            probe_path=probe,
+            total_bytes=usage.total,
+            free_bytes=usage.free,
+            free_gb=round(usage.free / (1024 ** 3), 2),
+            used_gb=round(usage.used / (1024 ** 3), 2),
+            capture_dir_bytes=dir_size,
+            capture_dir_mb=round(dir_size / (1024 ** 2), 2),
+        )
+    except Exception as e:
+        info["error"] = str(e)
+    return ORJSONResponse(info)
+
+
 @app.post(
     "/v1/embeddings",
     response_class=ORJSONResponse,
