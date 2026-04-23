@@ -45,11 +45,15 @@ def _maybe_finalize_capture(req: "Req") -> None:
         from sglang.srt.managers.capture_state import capture_finalize
 
         rp_idx = getattr(req, "req_pool_idx", None)
+        rid = getattr(req, "rid", None)
+        logger.info(
+            "[capture-debug] _maybe_finalize_capture rp=%s rid=%s", rp_idx, rid
+        )
         if rp_idx is None:
             return
-        capture_finalize(int(rp_idx), rid=getattr(req, "rid", None))
+        capture_finalize(int(rp_idx), rid=rid)
     except Exception as e:
-        logger.debug("[capture] finalize skipped: %s", e)
+        logger.exception("[capture] finalize failed: %s", e)
 
 
 class SchedulerOutputProcessorMixin:
@@ -191,6 +195,7 @@ class SchedulerOutputProcessorMixin:
                         self.maybe_collect_routed_experts(req)
                         release_kv_cache(req, self.tree_cache)
                         req.time_stats.set_completion_time()
+                        _maybe_finalize_capture(req)
                     elif not batch.decoding_reqs or req not in batch.decoding_reqs:
                         # This updates radix so others can match
                         self.tree_cache.cache_unfinished_req(req)
