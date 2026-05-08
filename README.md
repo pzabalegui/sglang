@@ -21,6 +21,139 @@
 <a href="https://github.com/sgl-project/sgl-learning-materials?tab=readme-ov-file#slides"><b>Slides</b></a>
 </p>
 
+## Fork: Activation Steering & Abliteration
+
+This is a fork of SGLang with patches for **runtime activation steering** — the ability to modify a model's hidden states during inference to remove refusal behavior (abliteration) or steer outputs in arbitrary directions, without modifying model weights.
+
+Based on the paper [*Refusal in Language Models Is Mediated by a Single Direction*](https://arxiv.org/abs/2406.11717).
+
+### Branches
+
+| Branch | Status | Description |
+|--------|--------|-------------|
+| `main` | Stable | Abliteration via projective steering with Gaussian multi-layer kernel |
+| `feature/activation-capture` | WIP | Deep residual-stream activation capture for extracting new steering directions |
+| `feature/steering-vectors` | WIP | Runtime-switchable emotion and arbitrary vector steering |
+
+---
+
+### Abliteration Patch (`main`)
+
+Abliteration removes a model's refusal behavior by subtracting the **refusal direction** — a single linear direction in activation space that mediates refusal — from hidden states at selected transformer layers during inference.
+
+**How it works:**
+
+1. A precomputed refusal direction vector `r̂` (shape `[hidden_size]`, unit-norm) is loaded from a `.pt` file at server startup via `--steering-vector-path`.
+2. During the forward pass, after each selected decoder layer, the component of the hidden states along `r̂` is removed using projective subtraction:
+   ```
+   proj = h · r̂                          # scalar projection onto refusal direction
+   h'   = h - scale * proj * r̂           # remove the refusal component
+   ```
+3. A **Gaussian kernel** (`--steering-mode gaussian`) spreads the intervention across multiple layers centered on a peak layer (e.g., layer 47) with configurable width (`--steering-kernel-width`). Only layers with non-negligible weight get GPU ops — zero overhead on other layers.
+4. **Decode-time clamped projection** (`--steering-decode-scale`) only steers tokens whose hidden states point *toward* the refusal direction (`proj > 0`), leaving math/code tokens unaffected.
+5. For CUDA-graph compatibility (TP>1 decode), all work buffers are pre-allocated as `nn.Buffer` during init — no dynamic tensor allocation during graph replay.
+
+**Supported models:** LLaMA, DeepSeek V2, GLM-4.7 (FP8 358B MoE), OLMoE, Qwen3.5.
+
+**Server launch example:**
+```bash
+python -m sglang.launch_server \
+  --model-path <model> \
+  --steering-vector-path refusal_direction.pt \
+  --steering-scale 6.0 \
+  --steering-layers '[47]' \
+  --steering-mode gaussian \
+  --steering-kernel-width 2.0 \
+  --steering-decode-scale 2.0 \
+  --disable-overlap-schedule   # required for TP>1
+```
+
+**Per-request control** via the OpenAI-compatible API:
+```json
+{
+  "model": "...",
+  "messages": [...],
+  "steering": {
+    "enabled": true,
+    "scale": 6.0,
+    "layers": [47, 48, 49]
+  }
+}
+```
+
+| CLI Flag | Default | Description |
+|----------|---------|-------------|
+| `--steering-vector-path` | None | Path to `.pt` refusal direction vector |
+| `--steering-scale` | 1.0 | Prefill steering scale |
+| `--steering-layers` | None (all) | JSON list of layer indices, e.g. `'[47]'` |
+| `--steering-mode` | `gaussian` | `single` or `gaussian` kernel |
+| `--steering-kernel-width` | 10.0 | Gaussian sigma (σ) |
+| `--steering-decode-scale` | 0.0 | Decode-time clamped projective scale (0 = disabled) |
+
+---
+
+### Activation Capture (`feature/activation-capture`) — WIP
+
+Records the full residual-stream activations at configurable transformer layers during inference, for use in computing new steering directions (e.g., via mean-difference between "refuse" and "comply" activations).
+
+**How it works:**
+
+1. During forward pass, after each selected decoder layer, the full residual stream (`hidden_states + residual`) is captured, cast to bfloat16, and moved to CPU.
+2. Per-request activations are accumulated in memory and flushed to disk as compressed `.npz` files when the request completes.
+3. Capture sessions are organized by CTF/experiment name, with one file per request turn: `{capture_dir}/{ctf}/turn_0001.npz`.
+4. Cross-process coordination (HTTP server ↔ scheduler) uses a JSON config file polled every 250ms.
+
+**Storage format** (`.npz` keys):
+- `L40`, `L43`, `L48`, ... — residual stream tensors, shape `(n_tokens, hidden_dim)`, stored as `uint16` (bfloat16 bitcast)
+- `_meta_*` — metadata (CTF name, turn index, request ID, layer list, token count)
+
+**API endpoints:**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/set_capture` | Start a capture session: `{"ctf": "experiment_name", "layers": [40,43,48]}` |
+| `POST` | `/stop_capture` | End session, flush pending buffers |
+| `GET` | `/capture_status` | Session state and counters |
+| `GET` | `/capture_disk` | Disk usage under capture directory |
+
+**CLI flags:** `--capture-dir`, `--capture-layers`, `--capture-max-tokens-per-request` (default 16384).
+
+---
+
+### Emotion / Arbitrary Vector Steering (`feature/steering-vectors`) — WIP
+
+Extends abliteration from a single refusal direction to **arbitrary steering vectors** (e.g., emotion directions) that can be switched at runtime without server restart.
+
+**How it works:**
+
+1. Emotion direction vectors are loaded from a `.npz` file (`--emotion-vectors-path`) containing named vectors (e.g., `"calm"`, `"assertive"`).
+2. At a target layer (`--emotion-target-layer`, default 43), the selected emotion direction is added to the hidden states, scaled by the L2 norm of the full representation:
+   ```
+   h' = h + strength * ||h + residual|| * emotion_dir
+   ```
+3. Runtime switching via file IPC — no server restart needed:
+   ```json
+   POST /set_steering {"emotion": "calm", "strength": 0.2}
+   GET  /get_steering
+   ```
+   Config is written to `/tmp/emotion_config.json` and polled with a 1-second cache by the scheduler process.
+4. Supports per-layer distinct direction vectors (`--steering-per-layer-path`, tensor shape `[n_layers, hidden_size]`) with separate scales for attention output (`--steering-attn-scale`) and MLP output (`--steering-mlp-scale`).
+5. Trapezoidal kernel option (`--steering-kernel trapezoidal`) with configurable ramp-up/plateau/ramp-down layers for smoother multi-layer intervention.
+
+**Additional CLI flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--emotion-vectors-path` | `.npz` file with named emotion direction vectors |
+| `--emotion-target-layer` | Layer to apply emotion steering (default 43) |
+| `--steering-per-layer-path` | Per-layer direction vectors `[n_layers, hidden_dim]` |
+| `--steering-attn-scale` | Scale for post-attention intervention |
+| `--steering-mlp-scale` | Scale for post-MLP intervention |
+| `--steering-kernel` | `gaussian` or `trapezoidal` |
+| `--steering-trap-start/end/ramp` | Trapezoidal kernel layer boundaries |
+
+---
+
 ## News
 - [2026/01] 🔥 SGLang Diffusion accelerates video and image generation ([blog](https://lmsys.org/blog/2026-01-16-sglang-diffusion/)).
 - [2025/12] SGLang provides day-0 support for latest open models ([MiMo-V2-Flash](https://lmsys.org/blog/2025-12-16-mimo-v2-flash/), [Nemotron 3 Nano](https://lmsys.org/blog/2025-12-15-run-nvidia-nemotron-3-nano/), [Mistral Large 3](https://github.com/sgl-project/sglang/pull/14213), [LLaDA 2.0 Diffusion LLM](https://lmsys.org/blog/2025-12-19-diffusion-llm/), [MiniMax M2](https://lmsys.org/blog/2025-11-04-miminmax-m2/)).
