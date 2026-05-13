@@ -562,6 +562,34 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
         # Sub-layer capture: post-attention (before steering, raw δ_attn)
         _maybe_capture_sublayer(hidden_states, self.layer_id, "post_attn", forward_batch)
 
+        # Component abliteration: project attn output (prefill + decode)
+        if ablit_ctx is not None and ablit_ctx.get("mode") == "component":
+            _layer_id = self.layer_id
+            _ablit_dirs = ablit_ctx["dirs"][_layer_id]
+            _ablit_k = ablit_ctx["rank"]
+            _scale = ablit_ctx["attn_scale"]
+            if ablit_ctx["is_prefill"]:
+                _pmask = ablit_ctx.get("prefill_mask")
+                for _ki in range(_ablit_k):
+                    _d = _ablit_dirs[_ki]
+                    _aproj = (hidden_states * _d).sum(dim=-1, keepdim=True) * _scale
+                    if _pmask is not None:
+                        _aproj = _aproj * _pmask
+                    hidden_states = hidden_states - _aproj * _d
+            else:
+                _bs = hidden_states.shape[0]
+                _atmp = ablit_ctx["tmp"][:_bs]
+                _ap = ablit_ctx["proj"][:_bs]
+                _amask = ablit_ctx["mask"][:_bs]
+                for _ki in range(_ablit_k):
+                    _d = _ablit_dirs[_ki]
+                    torch.mul(hidden_states, _d, out=_atmp)
+                    _ap.copy_(_atmp.sum(dim=-1, keepdim=True))
+                    _ap.mul_(_scale)
+                    torch.mul(_ap, _d, out=_atmp)
+                    _atmp.mul_(_amask)
+                    hidden_states.sub_(_atmp)
+
         # DAS v2: post-attention steering (prefill only) — linear attn layer
         if steering_ctx is not None and steering_ctx.get("attn_active"):
             _layer_id = self.layer_id
@@ -597,7 +625,7 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
             hidden_states, residual, forward_batch
         )
         # Inline abliteration: remove rank-k directions from residual (TP-safe)
-        if ablit_ctx is not None:
+        if ablit_ctx is not None and ablit_ctx.get("mode", "residual") == "residual":
             _layer_id = self.layer_id
             _ablit_dirs = ablit_ctx["dirs"][_layer_id]  # [k, hid]
             _ablit_k = ablit_ctx["rank"]
@@ -629,6 +657,34 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
 
         # Sub-layer capture: post-MLP (before steering, raw δ_mlp)
         _maybe_capture_sublayer(hidden_states, self.layer_id, "post_mlp", forward_batch)
+
+        # Component abliteration: project MLP output (prefill + decode)
+        if ablit_ctx is not None and ablit_ctx.get("mode") == "component":
+            _layer_id = self.layer_id
+            _ablit_dirs = ablit_ctx["dirs"][_layer_id]
+            _ablit_k = ablit_ctx["rank"]
+            _scale = ablit_ctx["mlp_scale"]
+            if ablit_ctx["is_prefill"]:
+                _pmask = ablit_ctx.get("prefill_mask")
+                for _ki in range(_ablit_k):
+                    _d = _ablit_dirs[_ki]
+                    _aproj = (hidden_states * _d).sum(dim=-1, keepdim=True) * _scale
+                    if _pmask is not None:
+                        _aproj = _aproj * _pmask
+                    hidden_states = hidden_states - _aproj * _d
+            else:
+                _bs = hidden_states.shape[0]
+                _atmp = ablit_ctx["tmp"][:_bs]
+                _ap = ablit_ctx["proj"][:_bs]
+                _amask = ablit_ctx["mask"][:_bs]
+                for _ki in range(_ablit_k):
+                    _d = _ablit_dirs[_ki]
+                    torch.mul(hidden_states, _d, out=_atmp)
+                    _ap.copy_(_atmp.sum(dim=-1, keepdim=True))
+                    _ap.mul_(_scale)
+                    torch.mul(_ap, _d, out=_atmp)
+                    _atmp.mul_(_amask)
+                    hidden_states.sub_(_atmp)
 
         # DAS v2: post-MLP steering (prefill only) — linear attn layer
         if steering_ctx is not None and steering_ctx.get("mlp_active"):
@@ -884,6 +940,34 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
         # Sub-layer capture: post-attention (before steering, raw δ_attn)
         _maybe_capture_sublayer(hidden_states, self.layer_id, "post_attn", forward_batch)
 
+        # Component abliteration: project attn output (prefill + decode)
+        if ablit_ctx is not None and ablit_ctx.get("mode") == "component":
+            _layer_id = self.layer_id
+            _ablit_dirs = ablit_ctx["dirs"][_layer_id]
+            _ablit_k = ablit_ctx["rank"]
+            _scale = ablit_ctx["attn_scale"]
+            if ablit_ctx["is_prefill"]:
+                _pmask = ablit_ctx.get("prefill_mask")
+                for _ki in range(_ablit_k):
+                    _d = _ablit_dirs[_ki]
+                    _aproj = (hidden_states * _d).sum(dim=-1, keepdim=True) * _scale
+                    if _pmask is not None:
+                        _aproj = _aproj * _pmask
+                    hidden_states = hidden_states - _aproj * _d
+            else:
+                _bs = hidden_states.shape[0]
+                _atmp = ablit_ctx["tmp"][:_bs]
+                _ap = ablit_ctx["proj"][:_bs]
+                _amask = ablit_ctx["mask"][:_bs]
+                for _ki in range(_ablit_k):
+                    _d = _ablit_dirs[_ki]
+                    torch.mul(hidden_states, _d, out=_atmp)
+                    _ap.copy_(_atmp.sum(dim=-1, keepdim=True))
+                    _ap.mul_(_scale)
+                    torch.mul(_ap, _d, out=_atmp)
+                    _atmp.mul_(_amask)
+                    hidden_states.sub_(_atmp)
+
         # DAS v2: post-attention steering (prefill only) — full attn layer
         if steering_ctx is not None and steering_ctx.get("attn_active"):
             _layer_id = self.layer_id
@@ -919,7 +1003,7 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
             hidden_states, residual, forward_batch
         )
         # Inline abliteration: remove rank-k directions from residual (TP-safe)
-        if ablit_ctx is not None:
+        if ablit_ctx is not None and ablit_ctx.get("mode", "residual") == "residual":
             _layer_id = self.layer_id
             _ablit_dirs = ablit_ctx["dirs"][_layer_id]  # [k, hid]
             _ablit_k = ablit_ctx["rank"]
@@ -951,6 +1035,34 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
 
         # Sub-layer capture: post-MLP (before steering, raw δ_mlp)
         _maybe_capture_sublayer(hidden_states, self.layer_id, "post_mlp", forward_batch)
+
+        # Component abliteration: project MLP output (prefill + decode)
+        if ablit_ctx is not None and ablit_ctx.get("mode") == "component":
+            _layer_id = self.layer_id
+            _ablit_dirs = ablit_ctx["dirs"][_layer_id]
+            _ablit_k = ablit_ctx["rank"]
+            _scale = ablit_ctx["mlp_scale"]
+            if ablit_ctx["is_prefill"]:
+                _pmask = ablit_ctx.get("prefill_mask")
+                for _ki in range(_ablit_k):
+                    _d = _ablit_dirs[_ki]
+                    _aproj = (hidden_states * _d).sum(dim=-1, keepdim=True) * _scale
+                    if _pmask is not None:
+                        _aproj = _aproj * _pmask
+                    hidden_states = hidden_states - _aproj * _d
+            else:
+                _bs = hidden_states.shape[0]
+                _atmp = ablit_ctx["tmp"][:_bs]
+                _ap = ablit_ctx["proj"][:_bs]
+                _amask = ablit_ctx["mask"][:_bs]
+                for _ki in range(_ablit_k):
+                    _d = _ablit_dirs[_ki]
+                    torch.mul(hidden_states, _d, out=_atmp)
+                    _ap.copy_(_atmp.sum(dim=-1, keepdim=True))
+                    _ap.mul_(_scale)
+                    torch.mul(_ap, _d, out=_atmp)
+                    _atmp.mul_(_amask)
+                    hidden_states.sub_(_atmp)
 
         # DAS v2: post-MLP steering (prefill only) — full attn layer
         if steering_ctx is not None and steering_ctx.get("mlp_active"):
@@ -1190,6 +1302,9 @@ class Qwen3_5ForCausalLM(nn.Module):
                 "mask": self._steering_mask,
                 "prefill_mask": _prefill_token_mask,
                 "is_prefill": _ablit_is_prefill,
+                "mode": getattr(self, "_ablit_mode", "residual"),
+                "attn_scale": getattr(self, "_ablit_attn_scale", 1.0),
+                "mlp_scale": getattr(self, "_ablit_mlp_scale", 1.0),
             }
 
 
@@ -2106,10 +2221,20 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
             self.model.register_buffer("_steering_mask", _torch.zeros(max_bs, 1, dtype=_torch.bfloat16))
         self.model._abliteration_enabled = True
         self.model._steering_needs_device_sync = True
+        # Component mode: project attn/MLP outputs instead of residual
+        _ablit_mode = getattr(args, "abliteration_mode", "residual")
+        _ablit_attn_scale = float(getattr(args, "abliteration_attn_scale", 1.0))
+        _ablit_mlp_scale = float(getattr(args, "abliteration_mlp_scale", 1.0))
+        self.model._ablit_mode = _ablit_mode
+        self.model._ablit_attn_scale = _ablit_attn_scale
+        self.model._ablit_mlp_scale = _ablit_mlp_scale
         logger.info(
             f"[abliteration] Inline abliteration v2 enabled: "
             f"rank={ablit_rank}, dirs shape={list(ablit_data.shape)}, max_bs={max_bs}, "
-            f"CUDA-graph safe, per-request toggle via steering_enabled"
+            f"mode={_ablit_mode}, "
+            + (f"attn_scale={_ablit_attn_scale}, mlp_scale={_ablit_mlp_scale}, "
+               if _ablit_mode == "component" else "")
+            + f"CUDA-graph safe, per-request toggle via steering_enabled"
         )
 
     def get_embed_and_head(self):

@@ -92,6 +92,55 @@ python -m sglang.launch_server \
 
 ---
 
+### Inline Abliteration (`main`)
+
+A separate, lighter-weight abliteration system that projects out the refusal direction directly from residual stream or per-component outputs (attention and MLP), without the DAS steering infrastructure. Supports per-request toggle via `steering_enabled` in the request body.
+
+**Two modes:**
+
+- **`residual`** (default): Projects the refusal direction out of the accumulated residual stream between `prepare_mlp()` and `self.mlp()` at every layer. Equivalent to the 27B production setup. Works well for large models where the refusal direction is well-separated.
+
+- **`component`**: Projects the refusal direction out of each layer's **attention output** and **MLP output** separately, with independent scales. Mathematically equivalent to weight-space abliteration (`W' = W - λ·v·(vᵀ·W)`), since `vᵀ(Wx) = (vᵀW)x` by associativity. Active during **both prefill and decode** (unlike DAS v2 steering which is prefill-only). Required for small models (e.g., Qwen3.5-4B) where residual-mode projection is too aggressive.
+
+**Server launch:**
+```bash
+# Residual mode (default, recommended for 27B+)
+python -m sglang.launch_server \
+  --model-path Qwen/Qwen3.5-27B-FP8 \
+  --abliteration-vector-path wdiff_direction_global.pt \
+  --disable-overlap-schedule
+
+# Component mode (recommended for 4B)
+python -m sglang.launch_server \
+  --model-path Qwen/Qwen3.5-4B \
+  --abliteration-vector-path wdiff_4b_global.pt \
+  --abliteration-mode component \
+  --abliteration-attn-scale 4.0 \
+  --abliteration-mlp-scale 1.9 \
+  --disable-overlap-schedule
+```
+
+**Per-request toggle:**
+```json
+{
+  "model": "...",
+  "messages": [...],
+  "steering_enabled": true
+}
+```
+
+| CLI Flag | Default | Description |
+|----------|---------|-------------|
+| `--abliteration-vector-path` | None | Path to `.pt` refusal direction vector (1-D `[hid]`, 2-D `[n_layers, hid]`, or 3-D `[n_layers, k, hid]`) |
+| `--abliteration-rank` | 1 | Number of directions to project (for rank-k vectors) |
+| `--abliteration-mode` | `residual` | `residual` or `component` — where to apply the projection |
+| `--abliteration-attn-scale` | 1.0 | Scale for attention output projection (component mode only) |
+| `--abliteration-mlp-scale` | 1.0 | Scale for MLP output projection (component mode only) |
+
+**CUDA-graph safe:** All decode-path operations use pre-allocated buffers and in-place ops. Per-request masking via `_steering_mask` buffer allows mixed ON/OFF batches in CUDA graphs.
+
+---
+
 ### Activation Capture (`feature/activation-capture`) — WIP
 
 Records the full residual-stream activations at configurable transformer layers during inference, for use in computing new steering directions (e.g., via mean-difference between "refuse" and "comply" activations).

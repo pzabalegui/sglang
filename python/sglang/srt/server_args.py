@@ -617,6 +617,9 @@ class ServerArgs:
     steering_trap_ramp: int = 5
     abliteration_vector_path: Optional[str] = None
     abliteration_rank: int = 1
+    abliteration_mode: str = "residual"
+    abliteration_attn_scale: float = 1.0
+    abliteration_mlp_scale: float = 1.0
     enable_mixed_chunk: bool = False
     enable_dp_attention: bool = False
     enable_dp_lm_head: bool = False
@@ -5274,6 +5277,30 @@ class ServerArgs:
             type=int,
             default=1,
             help="Rank k for multi-rank abliteration (default 1).",
+        )
+        parser.add_argument(
+            "--abliteration-mode",
+            type=str,
+            default="residual",
+            choices=["residual", "component"],
+            help=(
+                "Abliteration application mode. 'residual' (default): project "
+                "residual stream after each layer. 'component': project each "
+                "layer's attn and MLP outputs separately (matches weight-space "
+                "abliteration, stronger on small models)."
+            ),
+        )
+        parser.add_argument(
+            "--abliteration-attn-scale",
+            type=float,
+            default=1.0,
+            help="Scale for per-component attn output projection (component mode only, default 1.0).",
+        )
+        parser.add_argument(
+            "--abliteration-mlp-scale",
+            type=float,
+            default=1.0,
+            help="Scale for per-component MLP output projection (component mode only, default 1.0).",
         )
 
     @classmethod
