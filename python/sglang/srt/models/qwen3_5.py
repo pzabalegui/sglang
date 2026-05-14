@@ -525,7 +525,6 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
                 for _ki in range(_ablit_k):
                     _d = _ablit_dirs[_ki]
                     _aproj = (residual * _d).sum(dim=-1, keepdim=True)
-                    _aproj.clamp_(min=0)
                     if _pmask is not None:
                         _aproj = _aproj * _pmask
                     residual = residual - _aproj * _d
@@ -538,7 +537,6 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
                     _d = _ablit_dirs[_ki]
                     torch.mul(residual, _d, out=_atmp)
                     _ap.copy_(_atmp.sum(dim=-1, keepdim=True))
-                    _ap.clamp_(min=0)
                     torch.mul(_ap, _d, out=_atmp)
                     _atmp.mul_(_amask)
                     residual.sub_(_atmp)
@@ -850,7 +848,6 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
                 for _ki in range(_ablit_k):
                     _d = _ablit_dirs[_ki]
                     _aproj = (residual * _d).sum(dim=-1, keepdim=True)
-                    _aproj.clamp_(min=0)
                     if _pmask is not None:
                         _aproj = _aproj * _pmask
                     residual = residual - _aproj * _d
@@ -863,7 +860,6 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
                     _d = _ablit_dirs[_ki]
                     torch.mul(residual, _d, out=_atmp)
                     _ap.copy_(_atmp.sum(dim=-1, keepdim=True))
-                    _ap.clamp_(min=0)
                     torch.mul(_ap, _d, out=_atmp)
                     _atmp.mul_(_amask)
                     residual.sub_(_atmp)
