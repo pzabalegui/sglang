@@ -1005,6 +1005,14 @@ class Qwen3_5ForCausalLM(nn.Module):
         )
         _ablit_ctx = None
         if _abliteration:
+            # Lazy device migration: move abliteration buffers to model device on first use
+            if getattr(self, "_steering_needs_device_sync", False):
+                _dev = hidden_states.device
+                for _bn in ("_ablit_dirs", "_ablit_tmp", "_ablit_proj", "_steering_mask"):
+                    _b = getattr(self, _bn, None)
+                    if _b is not None and _b.device != _dev:
+                        setattr(self, _bn, _b.to(_dev))
+                self._steering_needs_device_sync = False
             # Build per-token prefill mask from per-request steering mask
             _prefill_token_mask = None
             if _is_prefill and hasattr(forward_batch, "steering_mask_values") and forward_batch.steering_mask_values is not None:
