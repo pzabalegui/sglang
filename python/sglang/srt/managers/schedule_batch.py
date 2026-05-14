@@ -519,18 +519,14 @@ class Req(ReqDllmMixin):
         dimensions: Optional[int] = None,
         http_worker_ipc: Optional[str] = None,
         steering_enabled: Optional[bool] = None,
-        steering_scale: Optional[float] = None,
-        steering_decode_scale: Optional[float] = None,
         time_stats: Optional[
             Union[APIServerReqTimeStats, DPControllerReqTimeStats]
         ] = None,
     ):
         # Input and output info
         self.rid = rid
-        # Per-request steering override (patched)
+        # Per-request abliteration toggle
         self.steering_enabled = steering_enabled
-        self.steering_scale = steering_scale
-        self.steering_decode_scale = steering_decode_scale
         self.origin_input_text = origin_input_text
         self.origin_input_ids_unpadded = (
             origin_input_ids_unpadded

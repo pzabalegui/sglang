@@ -177,11 +177,8 @@ class GenerateReqInput(BaseReq):
     # Use the processor's `to_str()` method to generate the serialized string.
     custom_logit_processor: Optional[Union[List[Optional[str]], str]] = None
 
-    # Per-request steering override (None = use server global config)
-    # Set via {"steering": {"enabled": true/false, "scale": 6.0}} in the curl body
+    # Per-request abliteration toggle (None = use server default)
     steering_enabled: Optional[bool] = None
-    steering_scale: Optional[float] = None
-    steering_decode_scale: Optional[float] = None
 
     # For disaggregated inference
     bootstrap_host: Optional[Union[List[str], str]] = None
@@ -740,10 +737,8 @@ class TokenizedGenerateReqInput(BaseReq):
     need_wait_for_image: bool = False
     num_items_assigned: Optional[List] = None
 
-    # Per-request steering override
+    # Per-request abliteration toggle
     steering_enabled: Optional[bool] = None
-    steering_scale: Optional[float] = None
-    steering_decode_scale: Optional[float] = None
 
     # For observability
     time_stats: Optional[Union[APIServerReqTimeStats, DPControllerReqTimeStats]] = None

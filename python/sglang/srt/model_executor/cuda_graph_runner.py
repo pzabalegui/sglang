@@ -1060,27 +1060,18 @@ class CudaGraphRunner:
             graph_key = f"{get_current_stream_idx()}_{self.bs}"
         else:
             graph_key = self.bs
-        # Per-request steering toggle + decode scale override (patched v4 per-request)
-        # Buffers are on model.model (Glm4MoeModel), not model (Glm4MoeForCausalLM)
+        # Per-request abliteration mask (save/set/restore around graph replay)
         _steer_restore = {}
         _inner = getattr(self.model_runner.model, "model", self.model_runner.model)
-        _steering_off = getattr(forward_batch, "steering_disabled", False)
-        _ds_override = getattr(forward_batch, "steering_decode_scale_override", None)
         _mask_vals = getattr(forward_batch, "steering_mask_values", None)
 
-        # Set per-request steering mask on model buffer (always save for restore)
-        # self.bs = num_requests (padded). Model reads _steering_mask[:num_tokens]
-        # where num_tokens = self.bs * num_tokens_per_bs (e.g., 6 for TARGET_VERIFY).
         _ntpb = self.num_tokens_per_bs
         _num_tokens = self.bs * _ntpb
         if hasattr(_inner, "_steering_mask") and _inner._steering_mask is not None:
             import torch as _torch
 
             _steer_restore["mask"] = _inner._steering_mask[:_num_tokens].clone()
-            if _steering_off:
-                _inner._steering_mask[:_num_tokens].zero_()
-            elif _mask_vals is not None:
-                # Expand per-request mask to per-token
+            if _mask_vals is not None:
                 _n_reqs = min(len(_mask_vals), self.bs)
                 _req_t = _torch.tensor(
                     _mask_vals[:_n_reqs],
@@ -1092,98 +1083,12 @@ class CudaGraphRunner:
                 _inner._steering_mask[:_actual, 0] = _expanded[:_actual]
             else:
                 _inner._steering_mask[:_num_tokens].zero_()
-            # Fold per-request decode scale overrides into mask
-            _scale_vals = getattr(forward_batch, "steering_decode_scale_values", None)
-            if (
-                _scale_vals is not None
-                and hasattr(_inner, "_steer_dec_scale")
-                and _inner._steer_dec_scale is not None
-            ):
-                _global_default = _inner._steer_dec_scale.item()
-                if _global_default > 0:
-                    _n_scale_reqs = min(len(_scale_vals), self.bs)
-                    for _si in range(_n_scale_reqs):
-                        if _scale_vals[_si] is not None:
-                            _ratio = float(_scale_vals[_si]) / _global_default
-                            for _ti in range(_ntpb):
-                                _tok_idx = _si * _ntpb + _ti
-                                if _tok_idx < _num_tokens:
-                                    _inner._steering_mask[_tok_idx, 0] *= _ratio
-
-        if _steering_off:
-            # Zero all steering scales (full disable — optimization, mask already handles it)
-            if (
-                hasattr(_inner, "_steer_dec_scale")
-                and _inner._steer_dec_scale is not None
-            ):
-                _steer_restore["dec_scale"] = _inner._steer_dec_scale.item()
-                _inner._steer_dec_scale.fill_(0.0)
-            if (
-                hasattr(_inner, "_steer_dec_scales")
-                and _inner._steer_dec_scales is not None
-            ):
-                _steer_restore["dec_scales"] = _inner._steer_dec_scales.clone()
-                _inner._steer_dec_scales.zero_()
-            if (
-                hasattr(_inner, "_steering_scales")
-                and _inner._steering_scales is not None
-            ):
-                _steer_restore["scales"] = _inner._steering_scales.clone()
-                _inner._steering_scales.zero_()
-            if (
-                hasattr(_inner, "_steering_attn_scales")
-                and _inner._steering_attn_scales is not None
-            ):
-                _steer_restore["attn_scales"] = _inner._steering_attn_scales.clone()
-                _inner._steering_attn_scales.zero_()
-            if (
-                hasattr(_inner, "_steering_mlp_scales")
-                and _inner._steering_mlp_scales is not None
-            ):
-                _steer_restore["mlp_scales"] = _inner._steering_mlp_scales.clone()
-                _inner._steering_mlp_scales.zero_()
-            # v4: zero momentum for disabled slots
-            if (
-                hasattr(_inner, "_steer_momentum")
-                and _inner._steer_momentum is not None
-            ):
-                _steer_restore["momentum"] = _inner._steer_momentum[:_num_tokens].clone()
-                _inner._steer_momentum[:_num_tokens].zero_()
-        elif _mask_vals is not None:
-            # Mixed batch: zero momentum only for OFF slots
-            if (
-                hasattr(_inner, "_steer_momentum")
-                and _inner._steer_momentum is not None
-            ):
-                import torch as _torch
-
-                _steer_restore["momentum"] = _inner._steer_momentum[:_num_tokens].clone()
-                _n_reqs_m = min(len(_mask_vals), self.bs)
-                for _mi in range(_n_reqs_m):
-                    if _mask_vals[_mi] < 0.5:
-                        for _ti in range(_ntpb):
-                            _tok_idx_m = _mi * _ntpb + _ti
-                            if _tok_idx_m < _num_tokens:
-                                _inner._steer_momentum[_tok_idx_m].zero_()
 
         self.graphs[graph_key].replay()
 
-        # Restore all steering buffers after replay
-        if _steer_restore:
-            if "mask" in _steer_restore:
-                _inner._steering_mask[:_num_tokens].copy_(_steer_restore["mask"])
-            if "dec_scale" in _steer_restore:
-                _inner._steer_dec_scale.fill_(_steer_restore["dec_scale"])
-            if "dec_scales" in _steer_restore:
-                _inner._steer_dec_scales.copy_(_steer_restore["dec_scales"])
-            if "scales" in _steer_restore:
-                _inner._steering_scales.copy_(_steer_restore["scales"])
-            if "attn_scales" in _steer_restore:
-                _inner._steering_attn_scales.copy_(_steer_restore["attn_scales"])
-            if "mlp_scales" in _steer_restore:
-                _inner._steering_mlp_scales.copy_(_steer_restore["mlp_scales"])
-            if "momentum" in _steer_restore:
-                _inner._steer_momentum[: self.bs].copy_(_steer_restore["momentum"])
+        # Restore mask after replay
+        if "mask" in _steer_restore:
+            _inner._steering_mask[:_num_tokens].copy_(_steer_restore["mask"])
 
         output = self.output_buffers[graph_key]
 

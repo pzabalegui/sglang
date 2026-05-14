@@ -1516,8 +1516,6 @@ class Scheduler(
                 http_worker_ipc=recv_req.http_worker_ipc,
                 dllm_config=self.dllm_config,
                 steering_enabled=recv_req.steering_enabled,
-                steering_scale=recv_req.steering_scale,
-                steering_decode_scale=recv_req.steering_decode_scale,
                 time_stats=recv_req.time_stats,
             )
             req.tokenizer = self.tokenizer

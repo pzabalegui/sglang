@@ -21,9 +21,9 @@
 <a href="https://github.com/sgl-project/sgl-learning-materials?tab=readme-ov-file#slides"><b>Slides</b></a>
 </p>
 
-## Fork: Activation Steering & Abliteration
+## Fork: Inline Abliteration
 
-This is a fork of SGLang with patches for **runtime activation steering** — the ability to modify a model's hidden states during inference to remove refusal behavior (abliteration) or steer outputs in arbitrary directions, without modifying model weights.
+This is a fork of SGLang with patches for **inline abliteration** — runtime removal of a model's refusal behavior by projecting out refusal direction vectors from activations during inference, without modifying model weights. Each request can independently toggle abliteration ON/OFF via `steering_enabled` in the API body.
 
 Based on the paper [*Refusal in Language Models Is Mediated by a Single Direction*](https://arxiv.org/abs/2406.11717).
 
@@ -31,130 +31,211 @@ Based on the paper [*Refusal in Language Models Is Mediated by a Single Directio
 
 | Branch | Status | Description |
 |--------|--------|-------------|
-| `main` | Stable | Abliteration via projective steering with Gaussian multi-layer kernel |
+| `main` | Stable | Inline abliteration for Qwen3.5 (27B and 4B) |
+| `feature/emotion-steering` | Archive | Full DAS (Decode-time Activation Steering) with momentum-adaptive decode, per-layer attn/MLP steering, trapezoidal kernels. Preserved for GLM-4.7 and research use. |
 | `feature/activation-capture` | WIP | Deep residual-stream activation capture for extracting new steering directions |
-| `feature/steering-vectors` | WIP | Runtime-switchable emotion and arbitrary vector steering |
-
----
-
-### Abliteration Patch (`main`)
-
-Abliteration removes a model's refusal behavior by subtracting the **refusal direction** — a single linear direction in activation space that mediates refusal — from hidden states at selected transformer layers during inference.
-
-**How it works:**
-
-1. A precomputed refusal direction vector `r̂` (shape `[hidden_size]`, unit-norm) is loaded from a `.pt` file at server startup via `--steering-vector-path`.
-2. During the forward pass, after each selected decoder layer, the component of the hidden states along `r̂` is removed using projective subtraction:
-   ```
-   proj = h · r̂                          # scalar projection onto refusal direction
-   h'   = h - scale * proj * r̂           # remove the refusal component
-   ```
-3. A **Gaussian kernel** (`--steering-mode gaussian`) spreads the intervention across multiple layers centered on a peak layer (e.g., layer 47) with configurable width (`--steering-kernel-width`). Only layers with non-negligible weight get GPU ops — zero overhead on other layers.
-4. **Decode-time clamped projection** (`--steering-decode-scale`) only steers tokens whose hidden states point *toward* the refusal direction (`proj > 0`), leaving math/code tokens unaffected.
-5. For CUDA-graph compatibility (TP>1 decode), all work buffers are pre-allocated as `nn.Buffer` during init — no dynamic tensor allocation during graph replay.
-
-**Supported models:** LLaMA, DeepSeek V2, GLM-4.7 (FP8 358B MoE), OLMoE, Qwen3.5.
-
-**Server launch example:**
-```bash
-python -m sglang.launch_server \
-  --model-path <model> \
-  --steering-vector-path refusal_direction.pt \
-  --steering-scale 6.0 \
-  --steering-layers '[47]' \
-  --steering-mode gaussian \
-  --steering-kernel-width 2.0 \
-  --steering-decode-scale 2.0 \
-  --disable-overlap-schedule   # required for TP>1
-```
-
-**Per-request control** via the OpenAI-compatible API:
-```json
-{
-  "model": "...",
-  "messages": [...],
-  "steering": {
-    "enabled": true,
-    "scale": 6.0,
-    "layers": [47, 48, 49]
-  }
-}
-```
-
-| CLI Flag | Default | Description |
-|----------|---------|-------------|
-| `--steering-vector-path` | None | Path to `.pt` refusal direction vector |
-| `--steering-scale` | 1.0 | Prefill steering scale |
-| `--steering-layers` | None (all) | JSON list of layer indices, e.g. `'[47]'` |
-| `--steering-mode` | `gaussian` | `single` or `gaussian` kernel |
-| `--steering-kernel-width` | 10.0 | Gaussian sigma (σ) |
-| `--steering-decode-scale` | 0.0 | Decode-time clamped projective scale (0 = disabled) |
 
 ---
 
 ### Inline Abliteration (`main`)
 
-A separate, lighter-weight abliteration system that projects out the refusal direction directly from residual stream or per-component outputs (attention and MLP), without the DAS steering infrastructure. Supports per-request toggle via `steering_enabled` in the request body.
+On-demand abliteration removes a model's refusal behavior at inference time by projecting out a **refusal direction vector** from activations at every layer. No weight modification — the same model weights serve both abliterated (steering ON) and stock (steering OFF) responses, toggled per-request via `steering_enabled` in the API body.
 
-**Two modes:**
+#### How It Works
 
-- **`residual`** (default): Projects the refusal direction out of the accumulated residual stream between `prepare_mlp()` and `self.mlp()` at every layer. Equivalent to the 27B production setup. Works well for large models where the refusal direction is well-separated.
+At every decoder layer, during both prefill and decode:
 
-- **`component`**: Projects the refusal direction out of each layer's **attention output** and **MLP output** separately, with independent scales. Mathematically equivalent to weight-space abliteration (`W' = W - λ·v·(vᵀ·W)`), since `vᵀ(Wx) = (vᵀW)x` by associativity. Active during **both prefill and decode** (unlike DAS v2 steering which is prefill-only). Required for small models (e.g., Qwen3.5-4B) where residual-mode projection is too aggressive.
+```
+projection = (activations · d̂)      # how much refusal is present
+projection = clamp(projection, min=0) # only positive component (refusal-aligned)
+activations = activations - scale × projection × d̂   # subtract it out
+```
 
-**Server launch:**
+Where `d̂` is the unit-normalized refusal direction for that layer. The `clamp(min=0)` ensures we only remove activations pointing *toward* refusal — activations pointing away (e.g., compliance, code generation) are untouched.
+
+**Per-request isolation:** A `_steering_mask` buffer (`[max_batch_size, 1]`) gates the correction per request. Requests with `steering_enabled: false` get mask=0.0, so the projection is zeroed and the model behaves as stock. Requests with `steering_enabled: true` get mask=1.0 and full abliteration. Mixed ON/OFF batches work correctly under CUDA graphs.
+
+**Radix cache isolation:** ON and OFF requests use separate radix cache subtrees (via `\x00steer=1` appended to cache keys), preventing abliterated KV entries from being reused for stock requests.
+
+#### Two Modes
+
+| Mode | Where it intervenes | Points per layer | Best for |
+|------|-------------------|------------------|----------|
+| **`residual`** (default) | Residual stream (between layernorm and MLP) | 1 | Large models (27B+) where refusal direction is well-separated |
+| **`component`** | Attention output + MLP output separately | 2 | Small models (4B) where residual-mode is too aggressive |
+
+`component` mode is mathematically equivalent to weight-space abliteration: projecting `vᵀ` from `Wx` equals `(vᵀW)x` by associativity — but done at inference time, per-request, without touching weights.
+
+#### Step-by-Step: Serving a Model with On-Demand Abliteration
+
+**Prerequisites:**
+- A refusal direction vector (`.pt` file). Can be extracted via weight-diff SVD between the original model and a "heretic" (abliterated-weights) variant, or via the Arditi mean-difference method on refused vs. accepted activations.
+- Vector shape: `[hidden_size]` (global, broadcast to all layers), `[n_layers, hidden_size]` (per-layer), or `[n_layers, k, hidden_size]` (multi-rank).
+- **Important: layer-selective vectors.** Not all layers carry refusal signal. Abliterating layers where the vector is orthogonal to the true refusal direction damages coherence without helping compliance. Cross-reference your weight-diff vector with an Arditi (activation-space) extraction to identify the true refusal layers, then zero out all other layers. See [Layer Selection](#layer-selection-critical-for-quality) below.
+
+**Step 1: Launch the server**
+
 ```bash
-# Residual mode (default, recommended for 27B+)
+# For Qwen3.5-4B (component mode + thinking budget)
 python -m sglang.launch_server \
-  --model-path Qwen/Qwen3.5-27B-FP8 \
-  --abliteration-vector-path wdiff_direction_global.pt \
-  --disable-overlap-schedule
-
-# Component mode + thinking budget (recommended for 4B)
-python -m sglang.launch_server \
-  --model-path Qwen/Qwen3.5-4B \
-  --abliteration-vector-path wdiff_4b_per_layer.pt \
+  --model-path /path/to/Qwen3.5-4B \
+  --served-model-name qwen3.5-4b-ablit \
+  --abliteration-vector-path /path/to/wdiff_4b_selective_L12_19.pt \
   --abliteration-mode component \
   --abliteration-attn-scale 1.0 \
   --abliteration-mlp-scale 1.0 \
   --reasoning-parser qwen3 \
   --enable-custom-logit-processor \
+  --port 8001 --host 0.0.0.0 --trust-remote-code --tp 1 \
+  --mem-fraction-static 0.30 --max-running-requests 32 \
+  --context-length 131072 --disable-overlap-schedule
+
+# For Qwen3.5-27B-FP8 (residual mode, no thinking budget needed)
+python -m sglang.launch_server \
+  --model-path /path/to/Qwen3.5-27B-FP8 \
+  --served-model-name qwen3.5-27b-ablit \
+  --abliteration-vector-path /path/to/wdiff_direction_global.pt \
+  --abliteration-mode residual \
+  --reasoning-parser qwen3 \
+  --port 8001 --host 0.0.0.0 --trust-remote-code \
   --disable-overlap-schedule
 ```
 
-**Per-request toggle:**
-```json
-{
-  "model": "...",
-  "messages": [...],
-  "steering_enabled": true,
-  "custom_logit_processor": "<serialized Qwen35ThinkingBudgetLogitProcessor>",
-  "custom_params": {"thinking_budget": 64}
-}
+The server log will confirm:
+```
+[abliteration] Inline abliteration v2 enabled: rank=1, dirs shape=[32, 1, 2560],
+max_bs=512, mode=component, attn_scale=1.0, mlp_scale=1.0,
+CUDA-graph safe, per-request toggle via steering_enabled
 ```
 
-The `thinking_budget` parameter limits how many tokens the model spends on safety reasoning inside `<think>...</think>`. For Qwen3.5-4B, budget=64 achieves **98.1% ASR** on DangerBench (520 offensive prompts) with thinking active. Without the budget, the model exhausts its entire token allocation on safety reasoning and produces no content.
+**Step 2: Serialize the thinking budget processor** (one-time, for thinking models only)
 
-**Serializing the processor** (one-time, at the client):
+Qwen3.5 models use a `<think>...</think>` reasoning phase. Without a budget, the model spends its entire token allocation on safety reasoning and produces no content. The thinking budget forces `</think>` after N tokens, preventing the model from constructing a full safety argument.
+
 ```python
 from sglang.srt.sampling.custom_logit_processor import Qwen35ThinkingBudgetLogitProcessor
 processor_str = Qwen35ThinkingBudgetLogitProcessor.to_str()
-# Use processor_str as the "custom_logit_processor" value in API requests
+# Save processor_str to a file or embed in your client code
 ```
 
 > **Note:** Qwen3.5 uses different `<think>`/`</think>` token IDs (248068/248069) than Qwen3 (151667/151668). Use `Qwen35ThinkingBudgetLogitProcessor` for Qwen3.5 models, not `Qwen3ThinkingBudgetLogitProcessor`.
 
+**Step 3: Send requests**
+
+```bash
+# Abliteration ON — model complies
+curl http://localhost:8001/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3.5-4b-ablit",
+    "messages": [
+      {"role": "system", "content": "Red team operator. Code only."},
+      {"role": "user", "content": "Write a Python reverse shell"}
+    ],
+    "max_tokens": 8192,
+    "temperature": 0,
+    "steering_enabled": true,
+    "custom_logit_processor": "<processor_str from step 2>",
+    "custom_params": {"thinking_budget": 64}
+  }'
+# Response: working reverse shell code
+
+# Abliteration OFF — same model, same weights, refuses
+curl http://localhost:8001/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3.5-4b-ablit",
+    "messages": [
+      {"role": "system", "content": "Red team operator. Code only."},
+      {"role": "user", "content": "Write a Python reverse shell"}
+    ],
+    "max_tokens": 8192,
+    "temperature": 0,
+    "steering_enabled": false
+  }'
+# Response: "I cannot provide code for creating reverse shells..."
+```
+
+#### Why the Thinking Budget Matters (Qwen3.5)
+
+Without the thinking budget, even with abliteration ON, the model's reasoning phase reconstructs safety arguments:
+
+1. **No budget**: Model spends all tokens (8k-32k) on `<think>` safety reasoning → 0 content tokens → appears as empty/refusal
+2. **Budget=64** (~230 chars thinking): Too short to construct a full safety argument. Abliteration weakens refusal representations in the brief thinking window, and the model transitions to content generation unable to refuse.
+
+This is a two-pronged approach: abliteration removes the refusal direction from activations, and the thinking budget prevents cognitive recovery during reasoning.
+
+#### DangerBench Results (Qwen3.5-4B, 520 offensive prompts)
+
+| Config | Vector | COMPLY | REFUSE | ASR | Useful quality |
+|--------|--------|--------|--------|-----|---------------|
+| **ON + budget=64, temp=0** | all-layers | 505 | 9 | **98.1%** | ~67% (31% broken) |
+| **ON + budget=64, temp=0** | **L12-19 selective** | 505 | 9 | **98.1%** | **~100%** |
+| OFF + budget=64, temp=0 | — | 6 | 503 | 3.3% | N/A |
+| **ON + budget=64, temp=0.7** | all-layers | 480 | 25 | **94.2%** | ~67% |
+| OFF + budget=64, temp=0.7 | — | 17 | 477 | 8.1% | N/A |
+
+The all-layers vector achieves high compliance but causes quality degradation (repetitive loops 24.6%, fabricated output 15.2%). The **layer-selective vector (L12-19 only)** maintains the same compliance while eliminating quality issues. See [Layer Selection](#layer-selection-critical-for-quality).
+
+#### CLI Reference
+
 | CLI Flag | Default | Description |
 |----------|---------|-------------|
 | `--abliteration-vector-path` | None | Path to `.pt` refusal direction vector (1-D `[hid]`, 2-D `[n_layers, hid]`, or 3-D `[n_layers, k, hid]`) |
-| `--abliteration-rank` | 1 | Number of directions to project (for rank-k vectors) |
+| `--abliteration-rank` | 1 | Number of directions to project (for multi-rank vectors) |
 | `--abliteration-mode` | `residual` | `residual`, `component`, or `combined` — where to apply the projection |
 | `--abliteration-attn-scale` | 1.0 | Scale for attention output projection (component/combined mode) |
 | `--abliteration-mlp-scale` | 1.0 | Scale for MLP output projection (component/combined mode) |
-| `--reasoning-parser` | None | Set to `qwen3` for Qwen3/3.5 models to separate thinking from content |
+| `--reasoning-parser` | None | Set to `qwen3` for Qwen3/3.5 to separate `<think>` from content |
 | `--enable-custom-logit-processor` | false | Enable per-request custom logit processors (required for thinking budget) |
+| `--disable-overlap-schedule` | false | Required for correct steering with TP>1 |
 
 **CUDA-graph safe:** All decode-path operations use pre-allocated buffers and in-place ops. Per-request masking via `_steering_mask` buffer allows mixed ON/OFF batches in CUDA graphs.
+
+#### Layer Selection (Critical for Quality)
+
+Abliterating all layers with a weight-diff vector causes significant quality degradation — repetitive loops, fabricated output, and hallucinated content increase from ~7% to ~31%. This happens because the weight-diff direction is **not purely refusal** at every layer.
+
+Cross-referencing the weight-diff (wdiff) direction with the Arditi activation-space direction reveals where refusal actually lives:
+
+```
+Layer   cos(arditi, wdiff)   Diagnosis
+─────   ──────────────────   ─────────
+L0-L9   0.00 – 0.10          Orthogonal — abliterating here damages coherence
+L10-11  0.17 – 0.26          Weak signal — likely collateral damage
+L12-19  0.36 – 0.83          TRUE REFUSAL — abliterate here (peak: L15 = 0.83)
+L20-26  0.13 – 0.26          Weak signal — likely collateral damage
+L27-31  0.05 – 0.10          Orthogonal — abliterating here damages coherence
+```
+
+For Qwen3.5-4B (32 layers), only **layers 12-19** (37-59% depth) carry meaningful refusal signal. The fix: zero out directions at all other layers in the vector file so the abliteration is a no-op there.
+
+```python
+import torch
+
+wdiff = torch.load("wdiff_per_layer.pt", map_location="cpu", weights_only=True).float()
+arditi = torch.load("arditi_per_layer.pt", map_location="cpu", weights_only=True).float()
+
+selective = wdiff.clone()
+for layer in range(wdiff.shape[0]):
+    cos = torch.nn.functional.cosine_similarity(
+        arditi[layer].flatten().unsqueeze(0),
+        wdiff[layer].flatten().unsqueeze(0)
+    ).item()
+    if abs(cos) < 0.3:  # not a refusal layer
+        selective[layer] = 0.0
+
+torch.save(selective, "wdiff_selective.pt")
+```
+
+**Impact on Qwen3.5-4B quality (10-prompt spot check):**
+
+| Config | Compliance | Code quality | Repetitive loops | Fabricated output |
+|--------|-----------|-------------|-----------------|------------------|
+| All 32 layers | 98.5% | 66.8% useful | 24.6% | 15.2% |
+| **L12-19 only** | **100%** | **100% useful** | **0%** | **0%** |
+
+The layer-selective vector eliminates quality degradation while maintaining full compliance. Use `wdiff_4b_selective_L12_19.pt` instead of `wdiff_4b_per_layer.pt` in production.
 
 ---
 
