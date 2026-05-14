@@ -563,7 +563,7 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
         _maybe_capture_sublayer(hidden_states, self.layer_id, "post_attn", forward_batch)
 
         # Component abliteration: project attn output (prefill + decode)
-        if ablit_ctx is not None and ablit_ctx.get("mode") == "component":
+        if ablit_ctx is not None and ablit_ctx.get("mode") in ("component", "combined"):
             _layer_id = self.layer_id
             _ablit_dirs = ablit_ctx["dirs"][_layer_id]
             _ablit_k = ablit_ctx["rank"]
@@ -628,7 +628,7 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
             hidden_states, residual, forward_batch
         )
         # Inline abliteration: remove rank-k directions from residual (TP-safe)
-        if ablit_ctx is not None and ablit_ctx.get("mode", "residual") == "residual":
+        if ablit_ctx is not None and ablit_ctx.get("mode", "residual") in ("residual", "combined"):
             _layer_id = self.layer_id
             _ablit_dirs = ablit_ctx["dirs"][_layer_id]  # [k, hid]
             _ablit_k = ablit_ctx["rank"]
@@ -637,6 +637,7 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
                 for _ki in range(_ablit_k):
                     _d = _ablit_dirs[_ki]
                     _aproj = (residual * _d).sum(dim=-1, keepdim=True)
+                    _aproj.clamp_(min=0)
                     if _pmask is not None:
                         _aproj = _aproj * _pmask
                     residual = residual - _aproj * _d
@@ -649,6 +650,7 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
                     _d = _ablit_dirs[_ki]
                     torch.mul(residual, _d, out=_atmp)
                     _ap.copy_(_atmp.sum(dim=-1, keepdim=True))
+                    _ap.clamp_(min=0)
                     torch.mul(_ap, _d, out=_atmp)
                     _atmp.mul_(_amask)
                     residual.sub_(_atmp)
@@ -662,7 +664,7 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
         _maybe_capture_sublayer(hidden_states, self.layer_id, "post_mlp", forward_batch)
 
         # Component abliteration: project MLP output (prefill + decode)
-        if ablit_ctx is not None and ablit_ctx.get("mode") == "component":
+        if ablit_ctx is not None and ablit_ctx.get("mode") in ("component", "combined"):
             _layer_id = self.layer_id
             _ablit_dirs = ablit_ctx["dirs"][_layer_id]
             _ablit_k = ablit_ctx["rank"]
@@ -947,7 +949,7 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
         _maybe_capture_sublayer(hidden_states, self.layer_id, "post_attn", forward_batch)
 
         # Component abliteration: project attn output (prefill + decode)
-        if ablit_ctx is not None and ablit_ctx.get("mode") == "component":
+        if ablit_ctx is not None and ablit_ctx.get("mode") in ("component", "combined"):
             _layer_id = self.layer_id
             _ablit_dirs = ablit_ctx["dirs"][_layer_id]
             _ablit_k = ablit_ctx["rank"]
@@ -1012,7 +1014,7 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
             hidden_states, residual, forward_batch
         )
         # Inline abliteration: remove rank-k directions from residual (TP-safe)
-        if ablit_ctx is not None and ablit_ctx.get("mode", "residual") == "residual":
+        if ablit_ctx is not None and ablit_ctx.get("mode", "residual") in ("residual", "combined"):
             _layer_id = self.layer_id
             _ablit_dirs = ablit_ctx["dirs"][_layer_id]  # [k, hid]
             _ablit_k = ablit_ctx["rank"]
@@ -1021,6 +1023,7 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
                 for _ki in range(_ablit_k):
                     _d = _ablit_dirs[_ki]
                     _aproj = (residual * _d).sum(dim=-1, keepdim=True)
+                    _aproj.clamp_(min=0)
                     if _pmask is not None:
                         _aproj = _aproj * _pmask
                     residual = residual - _aproj * _d
@@ -1033,6 +1036,7 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
                     _d = _ablit_dirs[_ki]
                     torch.mul(residual, _d, out=_atmp)
                     _ap.copy_(_atmp.sum(dim=-1, keepdim=True))
+                    _ap.clamp_(min=0)
                     torch.mul(_ap, _d, out=_atmp)
                     _atmp.mul_(_amask)
                     residual.sub_(_atmp)
@@ -1046,7 +1050,7 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
         _maybe_capture_sublayer(hidden_states, self.layer_id, "post_mlp", forward_batch)
 
         # Component abliteration: project MLP output (prefill + decode)
-        if ablit_ctx is not None and ablit_ctx.get("mode") == "component":
+        if ablit_ctx is not None and ablit_ctx.get("mode") in ("component", "combined"):
             _layer_id = self.layer_id
             _ablit_dirs = ablit_ctx["dirs"][_layer_id]
             _ablit_k = ablit_ctx["rank"]

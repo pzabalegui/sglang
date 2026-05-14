@@ -5282,12 +5282,13 @@ class ServerArgs:
             "--abliteration-mode",
             type=str,
             default="residual",
-            choices=["residual", "component"],
+            choices=["residual", "component", "combined"],
             help=(
                 "Abliteration application mode. 'residual' (default): project "
                 "residual stream after each layer. 'component': project each "
                 "layer's attn and MLP outputs separately (matches weight-space "
-                "abliteration, stronger on small models)."
+                "abliteration, stronger on small models). 'combined': apply both "
+                "residual and component projections (triple intervention per layer)."
             ),
         )
         parser.add_argument(
