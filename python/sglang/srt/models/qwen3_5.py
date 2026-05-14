@@ -572,7 +572,9 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
                 _pmask = ablit_ctx.get("prefill_mask")
                 for _ki in range(_ablit_k):
                     _d = _ablit_dirs[_ki]
-                    _aproj = (hidden_states * _d).sum(dim=-1, keepdim=True) * _scale
+                    _aproj = (hidden_states * _d).sum(dim=-1, keepdim=True)
+                    _aproj.clamp_(min=0)
+                    _aproj = _aproj * _scale
                     if _pmask is not None:
                         _aproj = _aproj * _pmask
                     hidden_states = hidden_states - _aproj * _d
@@ -585,6 +587,7 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
                     _d = _ablit_dirs[_ki]
                     torch.mul(hidden_states, _d, out=_atmp)
                     _ap.copy_(_atmp.sum(dim=-1, keepdim=True))
+                    _ap.clamp_(min=0)
                     _ap.mul_(_scale)
                     torch.mul(_ap, _d, out=_atmp)
                     _atmp.mul_(_amask)
@@ -668,7 +671,9 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
                 _pmask = ablit_ctx.get("prefill_mask")
                 for _ki in range(_ablit_k):
                     _d = _ablit_dirs[_ki]
-                    _aproj = (hidden_states * _d).sum(dim=-1, keepdim=True) * _scale
+                    _aproj = (hidden_states * _d).sum(dim=-1, keepdim=True)
+                    _aproj.clamp_(min=0)
+                    _aproj = _aproj * _scale
                     if _pmask is not None:
                         _aproj = _aproj * _pmask
                     hidden_states = hidden_states - _aproj * _d
@@ -681,6 +686,7 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
                     _d = _ablit_dirs[_ki]
                     torch.mul(hidden_states, _d, out=_atmp)
                     _ap.copy_(_atmp.sum(dim=-1, keepdim=True))
+                    _ap.clamp_(min=0)
                     _ap.mul_(_scale)
                     torch.mul(_ap, _d, out=_atmp)
                     _atmp.mul_(_amask)
@@ -950,7 +956,9 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
                 _pmask = ablit_ctx.get("prefill_mask")
                 for _ki in range(_ablit_k):
                     _d = _ablit_dirs[_ki]
-                    _aproj = (hidden_states * _d).sum(dim=-1, keepdim=True) * _scale
+                    _aproj = (hidden_states * _d).sum(dim=-1, keepdim=True)
+                    _aproj.clamp_(min=0)
+                    _aproj = _aproj * _scale
                     if _pmask is not None:
                         _aproj = _aproj * _pmask
                     hidden_states = hidden_states - _aproj * _d
@@ -963,6 +971,7 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
                     _d = _ablit_dirs[_ki]
                     torch.mul(hidden_states, _d, out=_atmp)
                     _ap.copy_(_atmp.sum(dim=-1, keepdim=True))
+                    _ap.clamp_(min=0)
                     _ap.mul_(_scale)
                     torch.mul(_ap, _d, out=_atmp)
                     _atmp.mul_(_amask)
@@ -1046,7 +1055,9 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
                 _pmask = ablit_ctx.get("prefill_mask")
                 for _ki in range(_ablit_k):
                     _d = _ablit_dirs[_ki]
-                    _aproj = (hidden_states * _d).sum(dim=-1, keepdim=True) * _scale
+                    _aproj = (hidden_states * _d).sum(dim=-1, keepdim=True)
+                    _aproj.clamp_(min=0)
+                    _aproj = _aproj * _scale
                     if _pmask is not None:
                         _aproj = _aproj * _pmask
                     hidden_states = hidden_states - _aproj * _d
@@ -1059,6 +1070,7 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
                     _d = _ablit_dirs[_ki]
                     torch.mul(hidden_states, _d, out=_atmp)
                     _ap.copy_(_atmp.sum(dim=-1, keepdim=True))
+                    _ap.clamp_(min=0)
                     _ap.mul_(_scale)
                     torch.mul(_ap, _d, out=_atmp)
                     _atmp.mul_(_amask)
