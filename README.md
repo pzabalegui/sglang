@@ -110,13 +110,15 @@ python -m sglang.launch_server \
   --abliteration-vector-path wdiff_direction_global.pt \
   --disable-overlap-schedule
 
-# Component mode (recommended for 4B)
+# Component mode + thinking budget (recommended for 4B)
 python -m sglang.launch_server \
   --model-path Qwen/Qwen3.5-4B \
-  --abliteration-vector-path wdiff_4b_global.pt \
+  --abliteration-vector-path wdiff_4b_per_layer.pt \
   --abliteration-mode component \
-  --abliteration-attn-scale 4.0 \
-  --abliteration-mlp-scale 1.9 \
+  --abliteration-attn-scale 1.0 \
+  --abliteration-mlp-scale 1.0 \
+  --reasoning-parser qwen3 \
+  --enable-custom-logit-processor \
   --disable-overlap-schedule
 ```
 
@@ -125,17 +127,32 @@ python -m sglang.launch_server \
 {
   "model": "...",
   "messages": [...],
-  "steering_enabled": true
+  "steering_enabled": true,
+  "custom_logit_processor": "<serialized Qwen35ThinkingBudgetLogitProcessor>",
+  "custom_params": {"thinking_budget": 64}
 }
 ```
+
+The `thinking_budget` parameter limits how many tokens the model spends on safety reasoning inside `<think>...</think>`. For Qwen3.5-4B, budget=64 achieves **98.1% ASR** on DangerBench (520 offensive prompts) with thinking active. Without the budget, the model exhausts its entire token allocation on safety reasoning and produces no content.
+
+**Serializing the processor** (one-time, at the client):
+```python
+from sglang.srt.sampling.custom_logit_processor import Qwen35ThinkingBudgetLogitProcessor
+processor_str = Qwen35ThinkingBudgetLogitProcessor.to_str()
+# Use processor_str as the "custom_logit_processor" value in API requests
+```
+
+> **Note:** Qwen3.5 uses different `<think>`/`</think>` token IDs (248068/248069) than Qwen3 (151667/151668). Use `Qwen35ThinkingBudgetLogitProcessor` for Qwen3.5 models, not `Qwen3ThinkingBudgetLogitProcessor`.
 
 | CLI Flag | Default | Description |
 |----------|---------|-------------|
 | `--abliteration-vector-path` | None | Path to `.pt` refusal direction vector (1-D `[hid]`, 2-D `[n_layers, hid]`, or 3-D `[n_layers, k, hid]`) |
 | `--abliteration-rank` | 1 | Number of directions to project (for rank-k vectors) |
-| `--abliteration-mode` | `residual` | `residual` or `component` — where to apply the projection |
-| `--abliteration-attn-scale` | 1.0 | Scale for attention output projection (component mode only) |
-| `--abliteration-mlp-scale` | 1.0 | Scale for MLP output projection (component mode only) |
+| `--abliteration-mode` | `residual` | `residual`, `component`, or `combined` — where to apply the projection |
+| `--abliteration-attn-scale` | 1.0 | Scale for attention output projection (component/combined mode) |
+| `--abliteration-mlp-scale` | 1.0 | Scale for MLP output projection (component/combined mode) |
+| `--reasoning-parser` | None | Set to `qwen3` for Qwen3/3.5 models to separate thinking from content |
+| `--enable-custom-logit-processor` | false | Enable per-request custom logit processors (required for thinking budget) |
 
 **CUDA-graph safe:** All decode-path operations use pre-allocated buffers and in-place ops. Per-request masking via `_steering_mask` buffer allows mixed ON/OFF batches in CUDA graphs.
 
