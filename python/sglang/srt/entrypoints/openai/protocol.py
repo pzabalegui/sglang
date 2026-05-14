@@ -655,8 +655,9 @@ class ChatCompletionRequest(BaseModel):
     # Deprecated: use routed_dp_rank instead
     data_parallel_rank: Optional[int] = None
 
-    # Per-request abliteration toggle
+    # Per-request abliteration toggle (accepts both flat and nested formats)
     steering_enabled: Optional[bool] = None
+    steering: Optional[SteeringRequest] = None
 
     # OpenAI/SGLang default sampling parameters
     _DEFAULT_SAMPLING_PARAMS = {

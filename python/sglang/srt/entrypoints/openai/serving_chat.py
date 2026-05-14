@@ -314,8 +314,12 @@ class OpenAIServingChat(OpenAIServingBase):
             image_max_dynamic_patch=img_max_dynamic_patch,
             video_max_dynamic_patch=vid_max_dynamic_patch,
             max_dynamic_patch=getattr(request, "max_dynamic_patch", None),
-            # Per-request abliteration toggle
-            steering_enabled=request.steering_enabled,
+            # Per-request abliteration toggle (flat or nested format)
+            steering_enabled=(
+                request.steering_enabled
+                if request.steering_enabled is not None
+                else (request.steering.enabled if request.steering else None)
+            ),
         )
 
         return adapted_request, request
